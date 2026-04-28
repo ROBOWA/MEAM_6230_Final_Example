@@ -1,0 +1,9 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# LaTeX build artifacts (keep .tex and .pdf, skip intermediate files)
+report/*.aux
+report/*.log
+report/*.out
