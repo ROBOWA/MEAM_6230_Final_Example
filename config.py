@@ -4,7 +4,7 @@ import numpy as np
 
 # ── Sphere geometry ───────────────────────────────────────────────────
 SPHERE_CENTER = np.array([0.5, 0.0, 0.3])  # world frame [m]
-SPHERE_RADIUS = 0.15                         # [m]
+SPHERE_RADIUS = 0.3                         # [m]
 SPHERE_MAX_POLAR = 3 * np.pi / 4            # 135 deg  (3/8 of full sphere)
 TOOL_RADIUS = 0.009                          # polishing tool sphere [m]
 TOOL_Z_OFFSET = 0.06                         # tool tip offset along EE z-axis from attachment origin [m]
@@ -29,6 +29,8 @@ CTRL_DLS_LAMBDA = 0.02  # DLS regularization
 CTRL_V_MAX = 0.15     # EE speed limit [m/s]
 CTRL_FORCE_RAMP_TIME = 2.0   # time [s] to linearly ramp from F_preload to F_desired after contact
 CTRL_K_FORCE_FB = 0.0  # force-feedback gain [m/(s·N)]: v_d_n += k*(F_d - F_meas)
+CTRL_K_ORI = 2.0      # orientation alignment gain [1/s]: omega_d = k_ori * sigma * ori_err
+CTRL_D_ORI = 5.0      # orientation damping [N·m·s/rad]
                           # compensates d_t coupling artefact; F_err < 1.1 N at d_t=3000
 
 # Initial joint configuration – arm positioned above sphere top

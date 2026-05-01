@@ -119,6 +119,17 @@ class SimEnv:
     def jacobian(self):
         return self._jacobian_lin()
 
+    def ee_rot(self):
+        """EE site rotation matrix (3×3, columns = x/y/z axes) in world frame."""
+        return self.data.site_xmat[self._site_id].reshape(3, 3).copy()
+
+    def jacobian_full(self):
+        """Linear and rotational Jacobians (3×N_JOINTS each) at the EE site."""
+        J_lin = np.zeros((3, self.model.nv))
+        J_rot = np.zeros((3, self.model.nv))
+        mujoco.mj_jacSite(self.model, self.data, J_lin, J_rot, self._site_id)
+        return J_lin[:, :self.N_JOINTS], J_rot[:, :self.N_JOINTS]
+
     # ------------------------------------------------------------------
     # Simulation step
     # ------------------------------------------------------------------

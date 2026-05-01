@@ -2,13 +2,16 @@
 Passive DS Impedance Controller (no tank energy).
 
 Control law (Cartesian torque):
-    τ = J^T · D · (v_d − v_ee) + g(q)
+    τ = J_lin^T · D · (v_d − v_ee) + J_rot^T · d_ori · (ω_d − ω_ee) + g(q)
 
 where:
-  J     — 3×7 linear Jacobian at the EE site
+  J_lin — 3×7 linear Jacobian at the EE site
+  J_rot — 3×7 rotational Jacobian at the EE site
   D     — 3×3 positive-definite damping matrix (anisotropic: d_n in normal, d_t tangential)
   v_d   — desired EE linear velocity from DS + depth spring + force modulation
-  v_ee  — actual EE linear velocity = J @ q̇
+  v_ee  — actual EE linear velocity = J_lin @ q̇
+  ω_d   — desired angular velocity from surface-normal alignment (sigma-weighted)
+  ω_ee  — actual EE angular velocity = J_rot @ q̇
   g(q)  — gravity + Coriolis (from data.qfrc_bias)
 
 Additionally a joint-space null-space stiffness prevents drift to joint limits.
@@ -38,6 +41,8 @@ class PolishingController:
         force_ramp_time=2.0,    # time [s] to linearly ramp F_preload → F_d after contact
         k_force_fb=0.0,      # force-feedback gain [m/(s·N)]: adjusts v_d_n to correct
                              # measured-force error; compensates d_t coupling artefact
+        k_ori=5.0,           # orientation alignment gain [1/s]
+        d_ori=10.0,           # orientation damping [N·m·s/rad]
     ):
         self.env = env
         self.sphere = sphere
@@ -56,6 +61,8 @@ class PolishingController:
         self.use_force_feedback = use_force_feedback
         self.k_force_fb = k_force_fb
         self.force_ramp_time = force_ramp_time
+        self.k_ori = k_ori
+        self.d_ori = d_ori
         self.dt = env.model.opt.timestep
         self._n_joints = env.N_JOINTS
 
@@ -69,10 +76,16 @@ class PolishingController:
         # Torque limits
         self._tau_max = np.array([87, 87, 87, 87, 12, 12, 12], dtype=float)
 
+        # Debug output from last step (read after ctrl.step())
+        self.last_ori_err_norm = 0.0
+        self.last_omega_d = np.zeros(3)
+
     def reset(self):
         self.env.data.ctrl[:self._n_joints] = 0.0
         self._contact_ramp_t = 0.0
         self.normal_force_filt = 0.0
+        self.last_ori_err_norm = 0.0
+        self.last_omega_d = np.zeros(3)
 
     # ------------------------------------------------------------------
     def step(self):
@@ -80,7 +93,7 @@ class PolishingController:
         ee_pos = self.env.ee_pos()
         q = self.env.qpos()
         qd = self.env.qvel()
-        J = self.env.jacobian()          # 3×7
+        J_lin, J_rot = self.env.jacobian_full()   # 3×7 each
 
         # ── 1. DS desired velocity ─────────────────────────────────────
         v_d, n, sigma = self.ds.compute(ee_pos)
@@ -147,23 +160,45 @@ class PolishingController:
         D = self.d_t * np.eye(3) + (self.d_n - self.d_t) * np.outer(n_dir, n_dir)
 
         # ── 4. Current EE velocity ─────────────────────────────────────
-        v_ee = J @ qd
+        v_ee = J_lin @ qd
 
         # ── 5. Cartesian impedance force ───────────────────────────────
         F_cart = D @ (v_d - v_ee)
 
-        # ── 6. Map to joint torques ────────────────────────────────────
-        tau = J.T @ F_cart
+        # ── 6. Orientation alignment torque ────────────────────────────
+        # Align tool z-axis with inward surface normal, weighted by sigma.
+        R_ee = self.env.ee_rot()
+        z_tool = R_ee[:, 2]          # current tool z-axis in world frame
+        z_des = -n                   # desired: point into surface
 
-        # ── 7. Gravity + Coriolis + joint-damping compensation ──────────
+        ori_err = np.cross(z_tool, z_des)   # axis-angle error, |err| ≈ sin(θ)
+
+        # Reduce gain in contact to avoid disturbing the measured force.
+        if contact_state == "contact":
+            # ori_weight = 0.3 + 0.7 * sigma
+            ori_weight = sigma
+        else:
+            ori_weight = sigma
+
+        omega_d = self.k_ori * ori_weight * ori_err
+        omega_ee = J_rot @ qd
+        T_ori = self.d_ori * (omega_d - omega_ee)
+
+        self.last_ori_err_norm = float(np.linalg.norm(ori_err))
+        self.last_omega_d = omega_d.copy()
+
+        # ── 7. Map to joint torques ────────────────────────────────────
+        tau = J_lin.T @ F_cart + J_rot.T @ T_ori
+
+        # ── 8. Gravity + Coriolis + joint-damping compensation ──────────
         # qfrc_bias = gravity + Coriolis only; qfrc_passive (joint damping)
         # is NOT included and must be cancelled so it doesn't stall the orbit.
         tau += self.env.data.qfrc_bias[:self._n_joints]
         tau -= self.env.data.qfrc_passive[:self._n_joints]
 
-        # ── 8. Null-space: joint stiffness/damping toward q_ref ───────
-        J_pinv = self._dls_pinv(J)
-        N = np.eye(self._n_joints) - J_pinv @ J
+        # ── 9. Null-space: joint stiffness/damping toward q_ref ───────
+        J_pinv = self._dls_pinv(J_lin)
+        N = np.eye(self._n_joints) - J_pinv @ J_lin
         tau_null = N @ (self.k_null * (self.q_ref - q) - self.b_null * qd)
         tau += tau_null
 

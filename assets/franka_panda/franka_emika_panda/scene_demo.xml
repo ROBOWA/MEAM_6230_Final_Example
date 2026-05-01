@@ -38,7 +38,7 @@
            solref tc=0.100: soft enough to reduce b_contact (≈26 N/(m/s)), limiting
            the extra normal force injected by tangential orbit speed.  Dampratio=1.5
            keeps the contact overdamped (no bounce). -->
-      <geom name="polishing_sphere" type="sphere" size="0.15"
+      <geom name="polishing_sphere" type="sphere" size="0.3"
             material="sphere_mat"
             contype="3" conaffinity="3"
             solref="0.300 1.5" solimp="0.9 0.99 0.001"

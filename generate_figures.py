@@ -28,7 +28,9 @@ ctrl = PolishingController(env, sphere, ds, q_ref=config.Q_INIT,
                            d_t=config.CTRL_D_T, k_null=config.CTRL_K_NULL,
                            b_null=config.CTRL_B_NULL, dls_lambda=config.CTRL_DLS_LAMBDA,
                            force_ramp_time=config.CTRL_FORCE_RAMP_TIME,
-                           k_force_fb=getattr(config, "CTRL_K_FORCE_FB", 0.0))
+                           k_force_fb=getattr(config, "CTRL_K_FORCE_FB", 0.0),
+                           k_ori=getattr(config, "CTRL_K_ORI", 2.0),
+                           d_ori=getattr(config, "CTRL_D_ORI", 5.0))
 env.reset(config.Q_INIT); ctrl.reset()
 env.model.opt.timestep = 0.001  # 1 ms control timestep → 1000 Hz control loop
 ctrl.dt = env.model.opt.timestep

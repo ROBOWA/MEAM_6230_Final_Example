@@ -59,6 +59,8 @@ def run():
         dls_lambda=config.CTRL_DLS_LAMBDA,
         force_ramp_time=config.CTRL_FORCE_RAMP_TIME,
         k_force_fb=getattr(config, "CTRL_K_FORCE_FB", 0.0),
+        k_ori=getattr(config, "CTRL_K_ORI", 2.0),
+        d_ori=getattr(config, "CTRL_D_ORI", 5.0),
     )
 
     # Initialise robot
