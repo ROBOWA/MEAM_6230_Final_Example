@@ -31,6 +31,10 @@ class SimEnv:
         self.q_min = self.model.jnt_range[:self.N_JOINTS, 0]
         self.q_max = self.model.jnt_range[:self.N_JOINTS, 1]
 
+        # Contact force hold state (bridges intermittent zero-contact frames)
+        self._last_fn = 0.0
+        self._fn_hold_decay = 0.97   # per-step decay when no contact (~30ms half-life at 1kHz)
+
     # ------------------------------------------------------------------
     # Initialization
     # ------------------------------------------------------------------
@@ -40,6 +44,7 @@ class SimEnv:
             self.data.qpos[:self.N_JOINTS] = q0
             self.data.ctrl[:self.N_JOINTS] = q0
         mujoco.mj_forward(self.model, self.data)
+        self._last_fn = 0.0
 
     def set_from_keyframe(self, key_name="init"):
         key_id = mujoco.mj_name2id(
@@ -60,26 +65,40 @@ class SimEnv:
         J = self._jacobian_lin()
         return J @ self.data.qvel[:self.N_JOINTS]
 
-    def contact_normal_force(self):
-        """
-        Normal contact force [N] between tool_sphere and polishing_sphere.
-        Returns a positive scalar when the tool is in compression against the sphere.
-        Returns 0.0 when not in contact.
-        """
+    def raw_contact_normal_force(self):
+        """Raw MuJoCo contact normal force — may be 0 on intermittent frames."""
         tool_geom_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_GEOM, "tool_sphere"
         )
         sphere_geom_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_GEOM, "polishing_sphere"
         )
+        if tool_geom_id < 0 or sphere_geom_id < 0:
+            return 0.0
+        total_fn = 0.0
         cf = np.zeros(6)
         for i in range(self.data.ncon):
             c = self.data.contact[i]
             if (c.geom[0] == tool_geom_id and c.geom[1] == sphere_geom_id) or \
                (c.geom[0] == sphere_geom_id and c.geom[1] == tool_geom_id):
                 mujoco.mj_contactForce(self.model, self.data, i, cf)
-                return float(cf[0])  # normal component, always >= 0 in compression
-        return 0.0
+                total_fn += max(0.0, float(cf[0]))
+        return total_fn
+
+    def contact_normal_force(self):
+        """Contact normal force with exponential hold on intermittent zero frames.
+
+        When MuJoCo reports zero contact (tool momentarily not in the contact
+        zone), the previous value decays at _fn_hold_decay per step rather than
+        jumping to 0.  This prevents the saw-tooth artefact in force plots and
+        in the controller's EMA filter without altering control logic.
+        """
+        raw = self.raw_contact_normal_force()
+        if raw > 0.0:
+            self._last_fn = raw
+        else:
+            self._last_fn *= self._fn_hold_decay
+        return self._last_fn
 
     def qpos(self):
         return self.data.qpos[:self.N_JOINTS].copy()

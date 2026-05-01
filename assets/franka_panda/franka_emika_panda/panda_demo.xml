@@ -1,7 +1,9 @@
 <mujoco model="panda demo">
   <compiler angle="radian" meshdir="assets" autolimits="true"/>
 
-  <option integrator="implicitfast" impratio="10" timestep="0.002"/>
+  <option integrator="implicitfast" impratio="10" timestep="0.001"
+          iterations="50" tolerance="1e-8"
+          noslip_iterations="5" noslip_tolerance="1e-7"/>
 
   <default>
     <default class="panda">
@@ -181,8 +183,8 @@
                     <geom mesh="link7_c" class="panda/collision"/>
                     <!-- Polishing tool: small sphere tip, only collides with the surface sphere -->
                     <body name="attachment" pos="0 0 0.107" quat="0.3826834 0 0 0.9238795">
-                      <site name="attachment_site" pos="0 0 0.01" size="0.012" rgba="1 0 0 1" group="0"/>
-                      <geom name="tool_sphere" type="sphere" size="0.009" pos="0 0 0.01"
+                      <site name="attachment_site" pos="0 0 0.06" size="0.012" rgba="1 0 0 1" group="0"/>
+                      <geom name="tool_sphere" type="sphere" size="0.009" pos="0 0 0.06"
                             contype="2" conaffinity="2" rgba="0.9 0.2 0.2 1" group="0"/>
                     </body>
                   </body>

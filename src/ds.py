@@ -5,12 +5,14 @@ Generates desired EE velocity by blending:
   - Reaching:  drives tool toward the sphere surface along the normal
   - Circular:  limit-cycle in the tangent plane around the attractor (top of sphere)
 
-Blend weight sigma transitions from 0 (above surface) to 1 (on surface)
-via a smooth sigmoid of the signed surface distance.
+Blend weight sigma transitions from 0 (far above surface) to 1 (at/below contact)
+via a smoothstep over [0, d_blend]:
+  d >= d_blend  →  sigma = 0  (pure reaching)
+  0 <= d < d_blend  →  smooth cubic transition
+  d <= 0          →  sigma = 1  (full polishing)
 """
 
 import numpy as np
-
 
 class PolishingDS:
     def __init__(
@@ -77,8 +79,10 @@ class PolishingDS:
             # At the attractor center, kick outward along t1 to start the orbit
             v_circ = self.omega * self.r_circle * t1
 
-        # --- Blend: sigma=0 above surface, sigma→1 on/below surface ---
-        sigma = 1.0 / (1.0 + np.exp(6.0 * d / self.d_blend))
+        # --- Blend: sigma=0 far above surface, sigma=1 at/below contact (d=0) ---
+        # Smoothstep over [0, d_blend]: full polishing at contact, full reaching far above.
+        z = np.clip(1.0 - d / self.d_blend, 0.0, 1.0)
+        sigma = z * z * (3.0 - 2.0 * z)
 
         v_d = (1.0 - sigma) * v_reach + sigma * v_circ
         return v_d, n, sigma

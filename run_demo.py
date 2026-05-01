@@ -19,15 +19,16 @@ import mujoco.viewer
 import matplotlib
 matplotlib.use("TkAgg")          # change to "Qt5Agg" if TkAgg unavailable
 import matplotlib.pyplot as plt
+from scipy.ndimage import uniform_filter1d
 
 # Make src importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 import config
-from sphere_surface import SphereSurface
-from ds import PolishingDS
-from sim_env import SimEnv
-from controller import PolishingController
+from src.sphere_surface import SphereSurface
+from src.ds import PolishingDS
+from src.sim_env import SimEnv
+from src.controller import PolishingController
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -56,13 +57,16 @@ def run():
         k_null=config.CTRL_K_NULL,
         b_null=config.CTRL_B_NULL,
         dls_lambda=config.CTRL_DLS_LAMBDA,
+        force_ramp_tau=config.CTRL_FORCE_RAMP_TAU,
+        k_force_fb=getattr(config, "CTRL_K_FORCE_FB", 0.0),
     )
 
     # Initialise robot
     env.reset(config.Q_INIT)
     ctrl.reset()
-
-    dt = env.model.opt.timestep  # 0.002 s → 500 Hz
+    env.model.opt.timestep = 0.001
+    ctrl.dt = env.model.opt.timestep
+    dt = env.model.opt.timestep
 
     # ── Logging arrays ────────────────────────────────────────────────
     max_steps = int(config.SIM_DURATION / dt)
@@ -92,7 +96,7 @@ def run():
             step_wall = time.time()
 
             # Controller step
-            v_d, n, sigma = ctrl.step()
+            v_d, n, sigma, _, _, _ = ctrl.step()
 
             # Simulation step
             env.step()
@@ -165,7 +169,10 @@ def _plot_results(t, pos, sigma, force, dist, c, R, F_d):
 
     # 4. Normal contact force
     ax4 = fig.add_subplot(2, 3, 4)
-    ax4.plot(t, force, lw=0.8, label="F_n measured")
+    lp_window = max(1, int(0.01 / (t[1] - t[0]))) if len(t) > 1 else 1  # 10 ms
+    force_filt = uniform_filter1d(force, size=lp_window)
+    ax4.plot(t, force, lw=0.4, alpha=0.3, color="tab:blue", label="Raw $F_n$")
+    ax4.plot(t, force_filt, lw=1.2, color="tab:blue", label="Filtered $F_n$ (LP 5 Hz)")
     ax4.axhline(F_d, color="r", ls="--", lw=1.2, label=f"F_d = {F_d} N")
     ax4.set_xlabel("time [s]"); ax4.set_ylabel("Force [N]")
     ax4.set_title("Normal Contact Force"); ax4.legend()

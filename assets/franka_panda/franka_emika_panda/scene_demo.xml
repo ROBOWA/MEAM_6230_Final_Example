@@ -33,10 +33,16 @@
     <!-- contype=3 (bits 1+2): collides with robot links (bit1) AND tool_sphere (bit2)
          This prevents any arm link from visually passing through the sphere. -->
     <body name="sphere_body" pos="0.5 0 0.3">
+      <!-- margin=0.002: contact activates 2mm before surface → no force dropout.
+           solimp dmin=0.8: stiff in margin zone → immediate resistance, no bounce.
+           solref tc=0.100: soft enough to reduce b_contact (≈26 N/(m/s)), limiting
+           the extra normal force injected by tangential orbit speed.  Dampratio=1.5
+           keeps the contact overdamped (no bounce). -->
       <geom name="polishing_sphere" type="sphere" size="0.15"
             material="sphere_mat"
             contype="3" conaffinity="3"
-            solref="0.02 0.5" solimp="0.9 0.99 0.001"
+            solref="0.300 1.5" solimp="0.9 0.99 0.001"
+            margin="0.001"
             condim="1"/>
     </body>
   </worldbody>

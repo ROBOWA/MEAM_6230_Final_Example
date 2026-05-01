@@ -25,11 +25,19 @@ class PolishingController:
         ds,
         q_ref,
         F_d=5.0,
-        d_n=200.0,   # normal damping [N·s/m]
-        d_t=150.0,   # tangential damping [N·s/m]
-        k_null=5.0,  # null-space joint stiffness [N·m/rad]
-        b_null=1.0,  # null-space joint damping [N·m·s/rad]
+        d_n=400.0,       # normal damping [N·s/m]
+        d_t=600.0,       # tangential damping [N·s/m]
+        k_null=5.0,      # null-space joint stiffness [N·m/rad]
+        b_null=5.0,      # null-space joint damping [N·m·s/rad]
         dls_lambda=0.02,
+        F_preload=1.0,       # approach preload force [N]
+        force_tol=3.0,       # measured force threshold for contact detection [N]
+        sigma_close=0.15,    # sigma above which force modulation begins
+        sigma_contact=0.45,  # sigma above which full polishing force is used (fallback)
+        use_force_feedback=False,  # use env.contact_normal_force() for contact detection
+        force_ramp_tau=0.04,     # F_des low-pass time constant [s]
+        k_force_fb=0.0,      # force-feedback gain [m/(s·N)]: adjusts v_d_n to correct
+                             # measured-force error; compensates d_t coupling artefact
     ):
         self.env = env
         self.sphere = sphere
@@ -41,14 +49,30 @@ class PolishingController:
         self.k_null = k_null
         self.b_null = b_null
         self.dls_lambda = dls_lambda
+        self.F_preload = F_preload
+        self.force_tol = force_tol
+        self.sigma_close = sigma_close
+        self.sigma_contact = sigma_contact
+        self.use_force_feedback = use_force_feedback
+        self.k_force_fb = k_force_fb
         self.dt = env.model.opt.timestep
         self._n_joints = env.N_JOINTS
+
+        # Filter state — F_des_normal low-pass (smooths preload→F_d step)
+        self.F_des_normal_filt = 0.0
+        self.force_ramp_tau = force_ramp_tau
+
+        # Filter state — raw MuJoCo contact force low-pass
+        self.normal_force_filt = 0.0
+        self.force_filter_alpha = 0.1   # EMA coefficient (smaller = smoother)
 
         # Torque limits
         self._tau_max = np.array([87, 87, 87, 87, 12, 12, 12], dtype=float)
 
     def reset(self):
         self.env.data.ctrl[:self._n_joints] = 0.0
+        self.F_des_normal_filt = 0.0
+        self.normal_force_filt = 0.0
 
     # ------------------------------------------------------------------
     def step(self):
@@ -62,14 +86,54 @@ class PolishingController:
         v_d, n, sigma = self.ds.compute(ee_pos)
 
         # ── 2. Contact surface following ───────────────────────────────
-        # Large d_t causes J^T·D·v_tan to have an outward normal component (coupling).
-        # We compensate by using a larger inward normal velocity command.
-        # v_d_n_eff = F_d/d_n + coupling_offset; measured F_contact ≈ F_d.
-        if sigma > 0.15:
-            v_d_tan = v_d - np.dot(v_d, n) * n    # tangential from DS
-            # Inward press: nominal 5/200=0.025 m/s + 0.055 to overcome J-coupling
-            v_d_n = 0.08 * (-n)                    # 80 mm/s → measured F_n ≈ 5-10 N
-            v_d = v_d_tan + v_d_n
+        # Normal velocity = F_des_filt / d_n  (paper-style force modulation).
+        # Three states: far (DS only), preload (approaching), contact (full F_d).
+
+        # 2a. Filter raw contact force measurement (EMA to reduce MuJoCo noise).
+        raw_force = self._estimate_normal_force()
+        if raw_force is not None:
+            self.normal_force_filt = (
+                self.force_filter_alpha * raw_force
+                + (1.0 - self.force_filter_alpha) * self.normal_force_filt
+            )
+            normal_force = self.normal_force_filt
+        else:
+            normal_force = None
+
+        # 2b. Determine contact state and raw desired normal force.
+        v_d_tan = v_d - np.dot(v_d, n) * n    # tangential DS component (always cheap)
+
+        if sigma <= self.sigma_close:
+            contact_state = "far"
+            F_des_normal = 0.0
+        else:
+            if self.use_force_feedback and normal_force is not None:
+                contact = normal_force >= self.force_tol
+            else:
+                contact = sigma > self.sigma_contact
+
+            if contact:
+                contact_state = "contact"
+                F_des_normal = self.F_d
+            else:
+                contact_state = "preload"
+                F_des_normal = self.F_preload
+
+        # 2c. Low-pass filter F_des_normal to avoid step-change impulse on state switch.
+        alpha = self.dt / (self.force_ramp_tau + self.dt)
+        self.F_des_normal_filt += alpha * (F_des_normal - self.F_des_normal_filt)
+
+        if sigma > self.sigma_close:
+            v_d_n_cmd = self.F_des_normal_filt / self.d_n
+            # Force feedback correction: when k_force_fb > 0, adjust pressing
+            # velocity to compensate for the measured force error.  This corrects
+            # the extra contact force injected by d_t coupling through J^T on a
+            # curved surface, letting d_t stay high (for orbit tracking) without
+            # inflating the steady-state contact force.
+            if self.k_force_fb > 0.0 and normal_force is not None and contact_state == "contact":
+                f_err = self.F_d - normal_force
+                v_d_n_cmd += self.k_force_fb * f_err
+            v_d = v_d_tan + v_d_n_cmd * (-n)
 
         # Speed limit
         spd = np.linalg.norm(v_d)
@@ -90,8 +154,11 @@ class PolishingController:
         # ── 6. Map to joint torques ────────────────────────────────────
         tau = J.T @ F_cart
 
-        # ── 7. Gravity + Coriolis compensation ────────────────────────
+        # ── 7. Gravity + Coriolis + joint-damping compensation ──────────
+        # qfrc_bias = gravity + Coriolis only; qfrc_passive (joint damping)
+        # is NOT included and must be cancelled so it doesn't stall the orbit.
         tau += self.env.data.qfrc_bias[:self._n_joints]
+        tau -= self.env.data.qfrc_passive[:self._n_joints]
 
         # ── 8. Null-space: joint stiffness/damping toward q_ref ───────
         J_pinv = self._dls_pinv(J)
@@ -103,7 +170,18 @@ class PolishingController:
         tau = np.clip(tau, -self._tau_max, self._tau_max)
         self.env.data.ctrl[:self._n_joints] = tau
 
-        return v_d, n, sigma
+        return v_d, n, sigma, contact_state, self.F_des_normal_filt, normal_force
+
+    # ------------------------------------------------------------------
+    def _estimate_normal_force(self):
+        """Return measured normal contact force [N], always available.
+
+        Returns the held/decayed contact force so the force-feedback path
+        (k_force_fb > 0) and the contact-detection path (use_force_feedback)
+        both have a non-None reading.  The sigma-based fallback is used for
+        contact state detection when use_force_feedback is False.
+        """
+        return self.env.contact_normal_force()
 
     # ------------------------------------------------------------------
     def _dls_pinv(self, J):
