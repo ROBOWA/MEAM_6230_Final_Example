@@ -9,7 +9,7 @@ from ds import PolishingDS
 from sim_env import SimEnv
 from controller import PolishingController
 
-def probe(d_n=None, d_t=None, F_d=None, duration=15.0, force_ramp_tau=None):
+def probe(d_n=None, d_t=None, F_d=None, duration=15.0, force_ramp_time=None):
     d_n = d_n if d_n is not None else config.CTRL_D_N
     d_t = d_t if d_t is not None else config.CTRL_D_T
     F_d = F_d if F_d is not None else config.FORCE_DESIRED
@@ -24,8 +24,8 @@ def probe(d_n=None, d_t=None, F_d=None, duration=15.0, force_ramp_tau=None):
                                  k_null=config.CTRL_K_NULL, b_null=config.CTRL_B_NULL,
                                  dls_lambda=config.CTRL_DLS_LAMBDA,
                                  k_force_fb=getattr(config, "CTRL_K_FORCE_FB", 0.0))
-    if force_ramp_tau is not None:
-        ctrl.force_ramp_tau = force_ramp_tau
+    if force_ramp_time is not None:
+        ctrl.force_ramp_time = force_ramp_time
     env.reset(config.Q_INIT)
     ctrl.reset()
     env.model.opt.timestep = 0.001
@@ -65,11 +65,11 @@ def probe(d_n=None, d_t=None, F_d=None, duration=15.0, force_ramp_tau=None):
     std    = forces.std()
     mn, mx = forces.min(), forces.max()
     in_contact = sigmas[sigmas > 0.3]
-    tau_str = f"tau={ctrl.force_ramp_tau:.3f}"
-    print(f"  d_n={d_n:6.0f}  d_t={d_t:5.0f}  {tau_str}  "
+    ramp_str = f"ramp={ctrl.force_ramp_time:.2f}s"
+    print(f"  d_n={d_n:6.0f}  d_t={d_t:5.0f}  {ramp_str}  "
           f"→  mean={mean:5.2f}N  std={std:4.2f}  [{mn:.1f}, {mx:.1f}]")
     return mean, std
 
 if __name__ == "__main__":
     print("=== Final config validation ===")
-    probe()   # uses config values: d_n=400, d_t=80, tau=0.04, F_d=15
+    probe()   # uses config values: d_n, d_t, F_d, force_ramp_time from config

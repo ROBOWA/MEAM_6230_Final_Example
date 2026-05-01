@@ -68,7 +68,7 @@ def run_once(k_force_fb, use_force_feedback, F_d, duration=DURATION):
                                k_null=config.CTRL_K_NULL,
                                b_null=config.CTRL_B_NULL,
                                dls_lambda=config.CTRL_DLS_LAMBDA,
-                               force_ramp_tau=config.CTRL_FORCE_RAMP_TAU,
+                               force_ramp_time=config.CTRL_FORCE_RAMP_TIME,
                                k_force_fb=k_force_fb,
                                use_force_feedback=use_force_feedback)
     env.reset(config.Q_INIT)

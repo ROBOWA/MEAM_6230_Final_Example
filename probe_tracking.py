@@ -25,7 +25,7 @@ def probe(d_t, k_limit, d_n=config.CTRL_D_N, duration=40.0):
                                  F_d=config.FORCE_DESIRED, d_n=d_n, d_t=d_t,
                                  k_null=config.CTRL_K_NULL, b_null=config.CTRL_B_NULL,
                                  dls_lambda=config.CTRL_DLS_LAMBDA,
-                                 force_ramp_tau=config.CTRL_FORCE_RAMP_TAU)
+                                 force_ramp_time=config.CTRL_FORCE_RAMP_TIME)
     env.reset(config.Q_INIT); ctrl.reset()
     env.model.opt.timestep = 0.001
     ctrl.dt = 0.001

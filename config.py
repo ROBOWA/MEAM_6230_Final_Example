@@ -14,7 +14,7 @@ DS_V_TARGET = 0.05    # reaching speed toward surface [m/s]
 DS_OMEGA = np.pi / 3  # circular angular frequency [rad/s]
 DS_R_CIRCLE = 0.05    # polishing circle radius [m]
 DS_K_LIMIT = 6.0      # radial limit-cycle attraction gain [1/s]  (↑ compensates lower d_t)
-DS_D_BLEND = 0.015    # distance scale for reaching↔circular blend [m]
+DS_D_BLEND = 0.07    # distance scale for reaching↔circular blend [m]
 
 # ── Force control ─────────────────────────────────────────────────────
 FORCE_DESIRED = 15.0   # desired normal contact force [N]
@@ -27,8 +27,8 @@ CTRL_K_NULL = 5.0     # null-space joint stiffness [N·m/rad]
 CTRL_B_NULL = 5.0     # null-space joint damping — raised to compensate for cancelled qfrc_passive
 CTRL_DLS_LAMBDA = 0.02  # DLS regularization
 CTRL_V_MAX = 0.15     # EE speed limit [m/s]
-CTRL_FORCE_RAMP_TAU = 0.04   # force filter time-constant [s] — smaller = faster ramp, no overshoot
-CTRL_K_FORCE_FB = 0.032  # force-feedback gain [m/(s·N)]: v_d_n += k*(F_d - F_meas)
+CTRL_FORCE_RAMP_TIME = 2.0   # time [s] to linearly ramp from F_preload to F_desired after contact
+CTRL_K_FORCE_FB = 0.0  # force-feedback gain [m/(s·N)]: v_d_n += k*(F_d - F_meas)
                           # compensates d_t coupling artefact; F_err < 1.1 N at d_t=3000
 
 # Initial joint configuration – arm positioned above sphere top

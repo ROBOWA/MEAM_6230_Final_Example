@@ -30,12 +30,12 @@ class PolishingController:
         k_null=5.0,      # null-space joint stiffness [N·m/rad]
         b_null=5.0,      # null-space joint damping [N·m·s/rad]
         dls_lambda=0.02,
-        F_preload=1.0,       # approach preload force [N]
+        F_preload=1,       # approach preload force [N]
         force_tol=3.0,       # measured force threshold for contact detection [N]
-        sigma_close=0.15,    # sigma above which force modulation begins
-        sigma_contact=0.45,  # sigma above which full polishing force is used (fallback)
+        sigma_close=0.9,    # sigma above which force modulation begins
+        sigma_contact=0.98,  # sigma above which full polishing force is used (fallback)
         use_force_feedback=False,  # use env.contact_normal_force() for contact detection
-        force_ramp_tau=0.04,     # F_des low-pass time constant [s]
+        force_ramp_time=2.0,    # time [s] to linearly ramp F_preload → F_d after contact
         k_force_fb=0.0,      # force-feedback gain [m/(s·N)]: adjusts v_d_n to correct
                              # measured-force error; compensates d_t coupling artefact
     ):
@@ -55,12 +55,12 @@ class PolishingController:
         self.sigma_contact = sigma_contact
         self.use_force_feedback = use_force_feedback
         self.k_force_fb = k_force_fb
+        self.force_ramp_time = force_ramp_time
         self.dt = env.model.opt.timestep
         self._n_joints = env.N_JOINTS
 
-        # Filter state — F_des_normal low-pass (smooths preload→F_d step)
-        self.F_des_normal_filt = 0.0
-        self.force_ramp_tau = force_ramp_tau
+        # Ramp state — counts time in contact to linearly scale F_preload→F_d
+        self._contact_ramp_t = 0.0
 
         # Filter state — raw MuJoCo contact force low-pass
         self.normal_force_filt = 0.0
@@ -71,7 +71,7 @@ class PolishingController:
 
     def reset(self):
         self.env.data.ctrl[:self._n_joints] = 0.0
-        self.F_des_normal_filt = 0.0
+        self._contact_ramp_t = 0.0
         self.normal_force_filt = 0.0
 
     # ------------------------------------------------------------------
@@ -106,25 +106,26 @@ class PolishingController:
         if sigma <= self.sigma_close:
             contact_state = "far"
             F_des_normal = 0.0
+            self._contact_ramp_t = 0.0
         else:
             if self.use_force_feedback and normal_force is not None:
                 contact = normal_force >= self.force_tol
             else:
-                contact = sigma > self.sigma_contact
+                contact = sigma >= self.sigma_contact
 
             if contact:
                 contact_state = "contact"
-                F_des_normal = self.F_d
+                # Linear ramp from F_preload to F_d over force_ramp_time seconds.
+                self._contact_ramp_t = min(self._contact_ramp_t + self.dt, self.force_ramp_time)
+                progress = self._contact_ramp_t / self.force_ramp_time
+                F_des_normal = self.F_preload + (self.F_d - self.F_preload) * progress
             else:
                 contact_state = "preload"
                 F_des_normal = self.F_preload
-
-        # 2c. Low-pass filter F_des_normal to avoid step-change impulse on state switch.
-        alpha = self.dt / (self.force_ramp_tau + self.dt)
-        self.F_des_normal_filt += alpha * (F_des_normal - self.F_des_normal_filt)
+                self._contact_ramp_t = 0.0
 
         if sigma > self.sigma_close:
-            v_d_n_cmd = self.F_des_normal_filt / self.d_n
+            v_d_n_cmd = F_des_normal / self.d_n
             # Force feedback correction: when k_force_fb > 0, adjust pressing
             # velocity to compensate for the measured force error.  This corrects
             # the extra contact force injected by d_t coupling through J^T on a
@@ -170,7 +171,7 @@ class PolishingController:
         tau = np.clip(tau, -self._tau_max, self._tau_max)
         self.env.data.ctrl[:self._n_joints] = tau
 
-        return v_d, n, sigma, contact_state, self.F_des_normal_filt, normal_force
+        return v_d, n, sigma, contact_state, F_des_normal, normal_force
 
     # ------------------------------------------------------------------
     def _estimate_normal_force(self):
