@@ -23,13 +23,13 @@
     <light pos="1 -1 1.5" dir="-0.5 0.5 -1" directional="true" diffuse="0.4 0.4 0.4"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
 
-    <!-- Pedestal covers the lower 5/8 of the sphere visually -->
-    <body name="pedestal" pos="0.5 0 0.125">
-      <geom type="cylinder" size="0.055 0.125" material="pedestal_mat"
+    <!-- Pedestal: covers the lower hemisphere visually (R=0.3 sphere, center z=0.3) -->
+    <body name="pedestal" pos="0.5 0 0.15">
+      <geom type="cylinder" size="0.28 0.15" material="pedestal_mat"
             contype="0" conaffinity="0"/>
     </body>
 
-    <!-- 3/8 sphere polishing surface: center=(0.5,0,0.3), R=0.15 m -->
+    <!-- 3/8 sphere polishing surface: center=(0.5,0,0.3), R=0.3 m -->
     <!-- contype=3 (bits 1+2): collides with robot links (bit1) AND tool_sphere (bit2)
          This prevents any arm link from visually passing through the sphere. -->
     <body name="sphere_body" pos="0.5 0 0.3">
@@ -41,7 +41,7 @@
       <geom name="polishing_sphere" type="sphere" size="0.3"
             material="sphere_mat"
             contype="3" conaffinity="3"
-            solref="0.300 1.5" solimp="0.9 0.99 0.001"
+            solref="0.050 1.5" solimp="0.9 0.99 0.001"
             margin="0.001"
             condim="3"
             friction="0.8 0.02 0.001"/>
@@ -53,7 +53,7 @@
     <force name="tool_force" site="attachment_site"/>
   </sensor>
 
-  <!-- Initial configuration: arm above sphere top at ~(0.5, 0, 0.45) -->
+  <!-- Initial configuration: arm above sphere top (z=0.60); Q_INIT in config.py is authoritative -->
   <keyframe>
     <key name="init"
          qpos="0 -0.4 0 -1.9 0 1.55 0.785"

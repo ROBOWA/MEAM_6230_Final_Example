@@ -78,6 +78,7 @@ class PolishingController:
 
         # Debug output from last step (read after ctrl.step())
         self.last_ori_err_norm = 0.0
+        self.last_omega_ff = np.zeros(3)
         self.last_omega_d = np.zeros(3)
 
     def reset(self):
@@ -85,6 +86,7 @@ class PolishingController:
         self._contact_ramp_t = 0.0
         self.normal_force_filt = 0.0
         self.last_ori_err_norm = 0.0
+        self.last_omega_ff = np.zeros(3)
         self.last_omega_d = np.zeros(3)
 
     # ------------------------------------------------------------------
@@ -173,18 +175,25 @@ class PolishingController:
 
         ori_err = np.cross(z_tool, z_des)   # axis-angle error, |err| ≈ sin(θ)
 
-        # Reduce gain in contact to avoid disturbing the measured force.
+        # Feedforward: predict how the surface normal rotates as the tool moves.
+        # For a sphere, ṅ ≈ v_tan / R, so ω_ff = n × ṅ = n × v_tan / R.
+        v_tan = v_d - np.dot(v_d, n) * n
+        R_eff = self.sphere.R + self.ds.r_tool   # EE center orbits at R + r_tool
+        omega_ff = np.cross(n, v_tan) / R_eff
+
+        # Reduce feedback gain in contact to avoid disturbing the measured force.
         if contact_state == "contact":
-            # ori_weight = 0.3 + 0.7 * sigma
-            ori_weight = sigma
+            ori_weight = 0.3 * sigma
         else:
             ori_weight = sigma
 
-        omega_d = self.k_ori * ori_weight * ori_err
+        omega_d = omega_ff + self.k_ori * ori_weight * ori_err
+        # omega_d = self.k_ori * ori_weight * ori_err
         omega_ee = J_rot @ qd
         T_ori = self.d_ori * (omega_d - omega_ee)
 
         self.last_ori_err_norm = float(np.linalg.norm(ori_err))
+        self.last_omega_ff = omega_ff.copy()
         self.last_omega_d = omega_d.copy()
 
         # ── 7. Map to joint torques ────────────────────────────────────

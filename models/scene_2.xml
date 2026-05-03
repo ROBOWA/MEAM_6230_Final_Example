@@ -1,0 +1,100 @@
+<mujoco model="tactile_control">
+
+  <compiler angle="radian"/>
+
+  <!-- Load Panda robot arm -->
+  <include file="franka/panda_3.xml"/>
+
+  <option gravity="0 0 -9.81"/>
+
+  <!-- Visual settings for high-resolution video recording -->
+  <visual>
+    <global offwidth="1920" offheight="1080"/>
+  </visual>
+
+  <worldbody>
+
+    <!-- Ground -->
+    <geom type="plane"
+          size="2 2 0.1"
+          rgba="0.8 0.8 0.8 1"
+          solimp="0.9 0.95 0.001"
+          solref="0.02 1.2"
+          friction="0.3 0.01 0.001"/>
+
+    <!-- World Coordinate Frame Visualization -->
+    <body name="world_frame" pos="0 0 0">
+      <!-- X-axis (Red) -->
+      <geom name="x_axis" type="cylinder" size="0.01 0.15"
+            pos="0.15 0 0" quat="0.707 0 0.707 0"
+            rgba="1 0 0 0.8" contype="0" conaffinity="0"/>
+      <!-- Y-axis (Green) -->
+      <geom name="y_axis" type="cylinder" size="0.01 0.15"
+            pos="0 0.15 0" quat="0.707 -0.707 0 0"
+            rgba="0 1 0 0.8" contype="0" conaffinity="0"/>
+      <!-- Z-axis (Blue) -->
+      <geom name="z_axis" type="cylinder" size="0.01 0.15"
+            pos="0 0 0.15" quat="1 0 0 0"
+            rgba="0 0 1 0.8" contype="0" conaffinity="0"/>
+    </body>
+    <!-- Workbench -->
+    <body name="workbench" pos="0.5545 0 0">
+    <!-- tabletop slab: square, side length = 0.25 -->
+    <!-- box size uses half-lengths, so size="0.125 0.125 0.02" -->
+    <!-- top surface z = 0.18 + 0.02 = 0.2 -->
+    <geom name="table_top"
+            type="box"
+            pos="0 0 0.18"
+            size="0.125 0.125 0.02"
+            rgba="0.55 0.40 0.30 1"
+            friction="1.0 0.01 0.001"
+            solimp="0.95 0.99 0.001"
+            solref="0.01 1.0"/>
+
+    <!-- optional legs, visual only -->
+    <geom name="leg1" type="box"
+            pos="0.10 0.10 0.09"
+            size="0.015 0.015 0.09"
+            rgba="0.45 0.30 0.20 1"
+            contype="0" conaffinity="0"/>
+    <geom name="leg2" type="box"
+            pos="-0.10 0.10 0.09"
+            size="0.015 0.015 0.09"
+            rgba="0.45 0.30 0.20 1"
+            contype="0" conaffinity="0"/>
+    <geom name="leg3" type="box"
+            pos="0.10 -0.10 0.09"
+            size="0.015 0.015 0.09"
+            rgba="0.45 0.30 0.20 1"
+            contype="0" conaffinity="0"/>
+    <geom name="leg4" type="box"
+            pos="-0.10 -0.10 0.09"
+            size="0.015 0.015 0.09"
+            rgba="0.45 0.30 0.20 1"
+            contype="0" conaffinity="0"/>
+
+    <!-- spherical patch at table center -->
+    <!-- radius = 0.1 -->
+    <!-- exposed height = 3/8 of sphere diameter = 0.075 -->
+    <!-- sphere center z = 0.175 -->
+    <!-- contype=3/conaffinity=3: collides with arm links (bit 0) and tool_collision (bit 1).
+         Contact params tuned for smooth polishing (no bounce, soft enough for force control). -->
+    <geom name="sphere_patch"
+            type="sphere"
+            pos="0 0 0.175"
+            size="0.1"
+            rgba="0.75 0.75 0.80 1"
+            contype="3" conaffinity="3"
+            solref="0.300 1.5" solimp="0.9 0.99 0.001"
+            margin="0.00" condim="3"
+            friction="0.8 0.02 0.001"/>
+
+    <!-- helpful markers -->
+    <site name="table_center" pos="0 0 0.2" size="0.006" rgba="1 0 0 1"/>
+    <site name="sphere_center" pos="0 0 0.175" size="0.006" rgba="0 1 0 1"/>
+    <site name="sphere_top" pos="0 0 0.275" size="0.006" rgba="0 0 1 1"/>
+    </body>
+
+  </worldbody>
+
+</mujoco>

@@ -1,0 +1,62 @@
+<mujoco model="polishing_demo">
+  <include file="panda_demo.xml"/>
+
+  <statistic center="0.35 0 0.35" extent="1.1"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="150" elevation="-25"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+      rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+    <material name="sphere_mat" rgba="0.5 0.75 0.95 0.85" specular="0.7" shininess="0.5"/>
+    <material name="pedestal_mat" rgba="0.35 0.35 0.4 1" specular="0.3" shininess="0.2"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 2.5" dir="0 0 -1" directional="true" diffuse="0.7 0.7 0.7"/>
+    <light pos="1 -1 1.5" dir="-0.5 0.5 -1" directional="true" diffuse="0.4 0.4 0.4"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+
+    <!-- Pedestal: covers the lower hemisphere visually (R=0.3 sphere, center z=0.3) -->
+    <body name="pedestal" pos="0.5 0 0.15">
+      <geom type="cylinder" size="0.28 0.15" material="pedestal_mat"
+            contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- 3/8 sphere polishing surface: center=(0.5,0,0.3), R=0.3 m -->
+    <!-- contype=3 (bits 1+2): collides with robot links (bit1) AND tool_sphere (bit2)
+         This prevents any arm link from visually passing through the sphere. -->
+    <body name="sphere_body" pos="0.5 0 0.3">
+      <!-- margin=0.002: contact activates 2mm before surface → no force dropout.
+           solimp dmin=0.8: stiff in margin zone → immediate resistance, no bounce.
+           solref tc=0.100: soft enough to reduce b_contact (≈26 N/(m/s)), limiting
+           the extra normal force injected by tangential orbit speed.  Dampratio=1.5
+           keeps the contact overdamped (no bounce). -->
+      <geom name="polishing_sphere" type="sphere" size="0.3"
+            material="sphere_mat"
+            contype="3" conaffinity="3"
+            solref="0.300 1.5" solimp="0.9 0.99 0.001"
+            margin="0.001"
+            condim="3"
+            friction="0.8 0.02 0.001"/>
+    </body>
+  </worldbody>
+
+  <!-- Force sensor at tool tip -->
+  <sensor>
+    <force name="tool_force" site="attachment_site"/>
+  </sensor>
+
+  <!-- Initial configuration: arm above sphere top (z=0.60); Q_INIT in config.py is authoritative -->
+  <keyframe>
+    <key name="init"
+         qpos="0 -0.4 0 -1.9 0 1.55 0.785"
+         ctrl="0 -0.4 0 -1.9 0 1.55 0.785"/>
+  </keyframe>
+</mujoco>

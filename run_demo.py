@@ -98,10 +98,21 @@ def run():
             step_wall = time.time()
 
             # Controller step
-            v_d, n, sigma, _, _, _ = ctrl.step()
+            v_d, n, sigma, contact_state, _, _ = ctrl.step()
 
             # Simulation step
             env.step()
+
+            # Debug arrows: EE z-axis (red) and surface normal (green)
+            viewer.user_scn.ngeom = 0
+            if contact_state in ("preload", "contact"):
+                ee_now = env.ee_pos()
+                z_tool = env.ee_rot()[:, 2]
+                _add_arrow(viewer.user_scn, ee_now, -z_tool, 0.15, 0.004,
+                           np.array([1.0, 0.2, 0.2, 1.0], np.float32))   # red  – tool −z
+                _add_arrow(viewer.user_scn, ee_now,  n,      0.15, 0.004,
+                           np.array([0.2, 1.0, 0.2, 1.0], np.float32))   # green – outward normal
+
             viewer.sync()
 
             # Log
@@ -199,6 +210,31 @@ def _plot_results(t, pos, sigma, force, dist, c, R, F_d):
     plt.savefig(out_path, dpi=150)
     print(f"Plots saved to {out_path}")
     plt.show()
+
+
+def _add_arrow(scn, pos, direction, length, radius, rgba):
+    """Append a colored arrow to an mjvScene (viewer.user_scn)."""
+    if scn.ngeom >= scn.maxgeom:
+        return
+    d = np.asarray(direction, dtype=float)
+    norm = np.linalg.norm(d)
+    if norm < 1e-8:
+        return
+    z = d / norm
+    # Orthonormal basis: choose a tmp vector not parallel to z
+    tmp = np.array([0.0, 0.0, 1.0]) if abs(z[2]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    x = np.cross(tmp, z); x /= np.linalg.norm(x)
+    y = np.cross(z, x)
+    mat = np.column_stack([x, y, z])   # columns = local axes in world frame
+    mujoco.mjv_initGeom(
+        scn.geoms[scn.ngeom],
+        mujoco.mjtGeom.mjGEOM_ARROW,
+        np.array([radius, radius, length]),
+        np.asarray(pos, dtype=float),
+        mat.flatten(),
+        rgba,
+    )
+    scn.ngeom += 1
 
 
 def _draw_sphere(ax, c, R, alpha=0.15):
