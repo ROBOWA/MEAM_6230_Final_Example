@@ -45,9 +45,29 @@ log_vd_tan  = np.zeros(N)
 log_vee_tan = np.zeros(N)
 log_vd_n    = np.zeros(N)
 log_vee_n   = np.zeros(N)
+log_disturbance = np.zeros(N, dtype=bool)
+
+disturbance_body_id = mujoco.mj_name2id(
+    env.model, mujoco.mjtObj.mjOBJ_BODY, config.DISTURBANCE_BODY_NAME
+)
 
 for k in range(N):
+    sim_time = k * dt
     v_d, n, sigma, _, _, _ = ctrl.step()
+
+    # Disturbance — applied before mj_step
+    active = (
+        config.DISTURBANCE_ENABLE
+        and config.DISTURBANCE_START_TIME <= sim_time
+             < config.DISTURBANCE_START_TIME + config.DISTURBANCE_DURATION
+    )
+    if active:
+        env.data.xfrc_applied[disturbance_body_id, :3] = config.DISTURBANCE_FORCE
+        env.data.xfrc_applied[disturbance_body_id, 3:] = 0.0
+    else:
+        env.data.xfrc_applied[disturbance_body_id, :] = 0.0
+    log_disturbance[k] = active
+
     env.step()
     ee   = env.ee_pos()
     v_ee = env.ee_vel()
@@ -68,6 +88,16 @@ for k in range(N):
         print(f"  {k*dt:.1f}s / {SIM_T:.0f}s")
 
 print("Done. Generating figures...")
+
+# Disturbance window for plot shading
+_d_t0 = _d_t1 = None
+if log_disturbance.any():
+    idx = np.where(log_disturbance)[0]
+    _d_t0, _d_t1 = log_t[idx[0]], log_t[idx[-1]]
+
+def _shade(ax):
+    if _d_t0 is not None:
+        ax.axvspan(_d_t0, _d_t1, color="orange", alpha=0.15, label="disturbance")
 
 OUT = os.path.join(os.path.dirname(__file__), "report_figs")
 os.makedirs(OUT, exist_ok=True)
@@ -129,13 +159,13 @@ axes[0].axhline(1.0, color="k", ls="--", lw=0.7, alpha=0.5, label="σ = 1 (full 
 axes[0].set_ylabel("σ (blend weight)")
 axes[0].set_ylim(-0.05, 1.05)
 axes[0].set_title("DS Blend Weight  (0 = reaching, 1 = polishing)")
-axes[0].legend(fontsize=8); axes[0].grid(True, alpha=0.3)
+_shade(axes[0]); axes[0].legend(fontsize=8); axes[0].grid(True, alpha=0.3)
 
 axes[1].plot(log_t, log_dist*1e3, lw=0.6, color="tab:blue")
 axes[1].axhline(0, color="r", ls="--", lw=0.8, label="Sphere surface")
 axes[1].set_ylabel("Signed dist. [mm]")
 axes[1].set_title("Signed Surface Distance  (+ above, − in contact)")
-axes[1].legend(fontsize=8); axes[1].grid(True, alpha=0.3)
+_shade(axes[1]); axes[1].legend(fontsize=8); axes[1].grid(True, alpha=0.3)
 
 LP_WINDOW = 10  # 10-step moving average ≈ 100 Hz LP at 1 kHz
 log_fn_filt = uniform_filter1d(log_fn, size=LP_WINDOW)
@@ -146,14 +176,19 @@ axes[2].axhline(config.FORCE_DESIRED, color="r", ls="--", lw=1.0,
 axes[2].set_ylabel("Normal force [N]")
 axes[2].set_xlabel("Time [s]")
 axes[2].set_title("Contact Normal Force")
-axes[2].legend(fontsize=8); axes[2].grid(True, alpha=0.3)
+_shade(axes[2]); axes[2].legend(fontsize=8); axes[2].grid(True, alpha=0.3)
 
 fig.tight_layout()
 fig.savefig(f"{OUT}/fig_force_dist.pdf", bbox_inches="tight", dpi=200)
 fig.savefig(f"{OUT}/fig_force_dist.png", bbox_inches="tight", dpi=200)
 plt.close()
 
-# ─── Figure 4: DS velocity field (2D slice at z=sphere top) ──────────────────
+# ─── Figure 4: DS velocity field (slice at limit-cycle plane) ────────────────
+# The limit cycle is a circle of radius r_lc on the sphere surface.
+# Its z-height (the plane we sample) is C[2] + sqrt(R² - r_lc²).
+r_lc = config.DS_R_CIRCLE
+z_lc = float(C[2] + np.sqrt(R**2 - r_lc**2))
+
 fig, ax = plt.subplots(figsize=(5, 5))
 grid_x = np.linspace(C[0]-0.12, C[0]+0.12, 20)
 grid_y = np.linspace(C[1]-0.12, C[1]+0.12, 20)
@@ -161,7 +196,7 @@ GX, GY = np.meshgrid(grid_x, grid_y)
 VX, VY = np.zeros_like(GX), np.zeros_like(GY)
 for i in range(GX.shape[0]):
     for j in range(GX.shape[1]):
-        p = np.array([GX[i,j], GY[i,j], C[2]+R])  # at sphere top
+        p = np.array([GX[i,j], GY[i,j], z_lc])   # at limit-cycle plane
         try:
             v, _, _ = ds.compute(p)
             VX[i,j], VY[i,j] = v[0], v[1]
@@ -170,15 +205,18 @@ for i in range(GX.shape[0]):
 spd = np.sqrt(VX**2 + VY**2) + 1e-9
 ax.streamplot(grid_x, grid_y, VX.T, VY.T, color=spd.T,
               cmap="viridis", linewidth=0.8, density=1.2, arrowsize=1.2)
-circ = plt.Circle((C[0], C[1]), config.DS_R_CIRCLE, fill=False,
-                  color="red", lw=1.5, ls="--", label=f"Limit circle r={config.DS_R_CIRCLE} m")
+# At z_lc the sphere cross-section has exactly radius r_lc, so the sphere
+# boundary and the limit cycle circle coincide in this projection.
+circ = plt.Circle((C[0], C[1]), r_lc, fill=False,
+                  color="red", lw=1.5, ls="--",
+                  label=f"Limit cycle / sphere cross-section (r={r_lc} m)")
 ax.add_patch(circ)
-ax.plot(*C[:2], "k+", ms=10, label="Sphere center (projected)")
+ax.plot(*C[:2], "k+", ms=10, label="Sphere centre (projected)")
 ax.set_xlim(C[0]-0.12, C[0]+0.12)
 ax.set_ylim(C[1]-0.12, C[1]+0.12)
 ax.set_aspect("equal")
 ax.set_xlabel("x [m]"); ax.set_ylabel("y [m]")
-ax.set_title("DS Velocity Field — Horizontal Slice at Sphere Top")
+ax.set_title(f"DS Velocity Field — Limit-Cycle Plane  (z = {z_lc:.4f} m)")
 ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
 fig.tight_layout()
 fig.savefig(f"{OUT}/fig_ds_field.pdf", bbox_inches="tight", dpi=200)
@@ -198,8 +236,8 @@ axes[0].axhline(target_tan, color="r", ls=":", lw=1.0,
                 label=f"Target {target_tan:.1f} mm/s")
 axes[0].set_ylabel("Speed [mm/s]")
 axes[0].set_title("Tangential Speed Tracking (polishing direction)")
-axes[0].legend(fontsize=8); axes[0].grid(True, alpha=0.3)
 axes[0].set_ylim(0, target_tan * 1.5)
+_shade(axes[0]); axes[0].legend(fontsize=8); axes[0].grid(True, alpha=0.3)
 
 axes[1].plot(log_t, log_vd_n*1e3,  lw=0.7, color="tab:orange", ls="--",
              label=r"$v_d \cdot \hat{n}$ (desired normal)")
@@ -209,7 +247,7 @@ axes[1].axhline(0, color="k", lw=0.5)
 axes[1].set_ylabel("Normal vel. [mm/s]")
 axes[1].set_xlabel("Time [s]")
 axes[1].set_title("Normal Velocity  (not tracked — converted to contact force by design)")
-axes[1].legend(fontsize=8); axes[1].grid(True, alpha=0.3)
+_shade(axes[1]); axes[1].legend(fontsize=8); axes[1].grid(True, alpha=0.3)
 
 fig.tight_layout()
 fig.savefig(f"{OUT}/fig_speed.pdf", bbox_inches="tight", dpi=200)
@@ -228,3 +266,63 @@ print(f"Tangential speed (polishing phase): "
       f"mean={log_vee_tan[t_contact_start:].mean()*1e3:.1f} mm/s  "
       f"target={target_tan:.1f} mm/s")
 print(f"\nFigures saved to: {OUT}/")
+
+# ─── Figure 4: DS convergence to surface in XZ cross-section ────────────────
+R_eff = R + config.TOOL_RADIUS
+
+fig, ax = plt.subplots(figsize=(6, 5))
+
+grid_x = np.linspace(C[0] - 0.12, C[0] + 0.12, 30)
+grid_z = np.linspace(C[2] + 0.02, C[2] + R_eff + 0.08, 30)
+GX, GZ = np.meshgrid(grid_x, grid_z)
+
+VX = np.zeros_like(GX)
+VZ = np.zeros_like(GZ)
+
+for i in range(GX.shape[0]):
+    for j in range(GX.shape[1]):
+        p = np.array([GX[i, j], C[1], GZ[i, j]])
+
+        try:
+            v, n, sigma = ds.compute(p)
+
+            # For visualization of pure approach-to-surface,
+            # show only outside-surface behavior
+            VX[i, j] = v[0]
+            VZ[i, j] = v[2]
+        except Exception:
+            VX[i, j] = np.nan
+            VZ[i, j] = np.nan
+
+spd = np.sqrt(VX**2 + VZ**2) + 1e-9
+
+ax.streamplot(
+    grid_x, grid_z, VX, VZ,
+    color=spd, cmap="viridis",
+    linewidth=0.8, density=1.2, arrowsize=1.2
+)
+
+# Draw physical sphere and tool-center offset sphere in x-z cross-section
+theta = np.linspace(0, np.pi, 300)
+
+x_phys = C[0] + R * np.sin(theta)
+z_phys = C[2] + R * np.cos(theta)
+ax.plot(x_phys, z_phys, "b--", lw=1.0, label="Physical sphere surface")
+
+x_eff = C[0] + R_eff * np.sin(theta)
+z_eff = C[2] + R_eff * np.cos(theta)
+ax.plot(x_eff, z_eff, "r-", lw=1.2, label="Tool-center contact surface")
+
+ax.plot(C[0], C[2], "k+", ms=10, label="Sphere center")
+
+ax.set_aspect("equal")
+ax.set_xlabel("x [m]")
+ax.set_ylabel("z [m]")
+ax.set_title("DS Convergence to Sphere Surface — XZ Cross-section")
+ax.legend(fontsize=8)
+ax.grid(True, alpha=0.3)
+fig.tight_layout()
+
+fig.savefig(f"{OUT}/fig_ds_surface_convergence_xz.pdf", bbox_inches="tight", dpi=200)
+fig.savefig(f"{OUT}/fig_ds_surface_convergence_xz.png", bbox_inches="tight", dpi=200)
+plt.close()

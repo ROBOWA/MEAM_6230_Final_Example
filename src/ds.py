@@ -57,7 +57,7 @@ class PolishingDS:
         ee_pos = np.asarray(ee_pos, dtype=float)
 
         d = self.sphere.signed_dist(ee_pos, self.r_tool)
-        t1, t2, n = self.sphere.tangent_frame(ee_pos)
+        t1, _, n = self.sphere.tangent_frame(ee_pos)
 
         # --- Reaching velocity: move toward the sphere along -n ---
         v_reach = -self.v_target * n
@@ -84,13 +84,13 @@ class PolishingDS:
         # Smoothstep over [0, d_blend]: full polishing at contact, full reaching far above.
         z = np.clip(1.0 - d / self.d_blend, 0.0, 1.0)
         sigma = z * z * (3.0 - 2.0 * z)
-        
+
         if sigma < self.sigma_close:
             v_min_ratio = 0.2
             normal_scale = v_min_ratio + (1.0 - v_min_ratio) * (1.0 - sigma)
 
             v_normal = normal_scale * (-self.v_target * n)
             v_d = v_normal + sigma * v_circ
-        else:  
+        else:
             v_d = (1.0 - sigma) * v_reach + sigma * v_circ
         return v_d, n, sigma
