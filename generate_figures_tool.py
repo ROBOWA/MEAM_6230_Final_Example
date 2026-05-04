@@ -117,20 +117,31 @@ fig.savefig(f"{OUT}/fig_trajectory_3d.pdf", bbox_inches="tight", dpi=200)
 fig.savefig(f"{OUT}/fig_trajectory_3d.png", bbox_inches="tight", dpi=200)
 plt.close()
 
-# ─── Figure 2: Top-view XY trajectory ────────────────────────────────
+# ─── Figure 2: Top-view XY trajectory (orbit plane) ─────────────────
 fig, ax = plt.subplots(figsize=(5, 5))
 theta = np.linspace(0, 2*np.pi, 200)
-ax.plot(C[0] + R*np.cos(theta), C[1] + R*np.sin(theta),
-        "b--", lw=0.8, alpha=0.4, label="Sphere equator")
+# Orbit geometry
+_R_eff   = np.sqrt(max(R**2 - config.TOOL_CYL_RADIUS**2, 0.0))
+_z_off   = np.sqrt(max(_R_eff**2 - config.DS_R_CIRCLE_TOOL**2, 0.0))
+_orbit_z = C[2] + _z_off
+# Limit-cycle circle
 ax.plot(C[0] + config.DS_R_CIRCLE_TOOL*np.cos(theta),
         C[1] + config.DS_R_CIRCLE_TOOL*np.sin(theta),
-        "r--", lw=1.0, label=f"Target circle (r={config.DS_R_CIRCLE_TOOL} m)")
+        "r-", lw=1.2, label=f"limit cycle  r={config.DS_R_CIRCLE_TOOL*1e3:.0f} mm")
+# Sphere cross-section at orbit height
+if _z_off < R:
+    _r_cut = np.sqrt(R**2 - _z_off**2)
+    ax.plot(C[0] + _r_cut*np.cos(theta), C[1] + _r_cut*np.sin(theta),
+            "k--", lw=0.8, alpha=0.6, label=f"sphere at z={_orbit_z:.3f} m")
 sc = ax.scatter(log_pos[t_contact_start:, 0], log_pos[t_contact_start:, 1],
                 c=log_t[t_contact_start:], cmap="plasma", s=2)
 plt.colorbar(sc, ax=ax, label="time [s]")
+_pad = config.DS_R_CIRCLE_TOOL * 1.5
+ax.set_xlim(C[0] - _pad, C[0] + _pad)
+ax.set_ylim(C[1] - _pad, C[1] + _pad)
 ax.set_aspect("equal")
 ax.set_xlabel("x [m]"); ax.set_ylabel("y [m]")
-ax.set_title("Tool Trajectory — Top View (XY Plane)")
+ax.set_title(f"Tool Trajectory — Polishing Orbit  (z = {_orbit_z:.3f} m)")
 ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
 fig.tight_layout()
 fig.savefig(f"{OUT}/fig_trajectory_xy.pdf", bbox_inches="tight", dpi=200)
@@ -159,6 +170,14 @@ axes[2].plot(log_t, log_fn,     lw=0.4, color="tab:orange", alpha=0.3, label="Ra
 axes[2].plot(log_t, fn_filt,    lw=1.2, color="tab:orange", label="Filtered $F_n$")
 axes[2].axhline(config.FORCE_DESIRED_TOOL, color="r", ls="--", lw=1.0,
                 label=f"Target $F_d$ = {config.FORCE_DESIRED_TOOL} N")
+if getattr(config, "DISTURBANCE_ENABLE", False):
+    _ts = getattr(config, "DISTURBANCE_START_TIME", 15.0)
+    _te = _ts + getattr(config, "DISTURBANCE_DURATION", 2.0)
+    _body  = getattr(config, "DISTURBANCE_BODY_NAME", "?")
+    _force = getattr(config, "DISTURBANCE_FORCE", np.zeros(3))
+    for _i, _ax in enumerate(axes):
+        _ax.axvspan(_ts, _te, alpha=0.12, color="tab:orange", zorder=0,
+                    label=(f"disturbance [{_body}]  {_force} N" if _i == 2 else None))
 axes[2].set_ylabel("Normal force [N]")
 axes[2].set_xlabel("Time [s]")
 axes[2].set_title("Contact Normal Force (wrist FT sensor)")

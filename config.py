@@ -11,7 +11,7 @@ TOOL_Z_OFFSET = 0.06                         # tool tip offset along EE z-axis f
 
 # ── DS parameters ─────────────────────────────────────────────────────
 DS_V_TARGET = 0.05    # reaching speed toward surface [m/s]
-DS_OMEGA = np.pi / 3  # circular angular frequency [rad/s]
+DS_OMEGA = np.pi / 8  # circular angular frequency [rad/s]
 DS_R_CIRCLE = 0.05    # polishing circle radius [m]
 DS_K_LIMIT = 6.0      # radial limit-cycle attraction gain [1/s]  (↑ compensates lower d_t)
 DS_D_BLEND = 0.07    # distance scale for reaching↔circular blend [m]
@@ -29,8 +29,8 @@ CTRL_DLS_LAMBDA = 0.02  # DLS regularization
 CTRL_V_MAX = 0.15     # EE speed limit [m/s]
 CTRL_FORCE_RAMP_TIME = 2.0   # time [s] to linearly ramp from F_preload to F_desired after contact
 CTRL_K_FORCE_FB = 0.0  # force-feedback gain [m/(s·N)]: v_d_n += k*(F_d - F_meas)
-CTRL_K_ORI = 5.0     # orientation alignment gain [1/s]: higher value keeps tilt < 2° during approach
-CTRL_D_ORI = 15.0     # orientation damping [N·m·s/rad]
+CTRL_K_ORI = 15     # orientation alignment gain [1/s]: higher value keeps tilt < 2° during approach
+CTRL_D_ORI = 10     # orientation damping [N·m·s/rad]
 
 # Initial joint configuration – arm positioned above sphere top
 # Places EE at approximately (0.5, 0, 0.55)
@@ -38,6 +38,13 @@ Q_INIT = np.array([0.0, -0.4, 0.0, -1.9, 0.0, 1, 0.785])
 
 # ── Simulation ────────────────────────────────────────────────────────
 SIM_DURATION = 35.0   # total demo duration [s]
+
+# ── External disturbance (simulates human interaction) ────────────────
+DISTURBANCE_ENABLE     = True
+DISTURBANCE_BODY_NAME  = "link6"                    # Franka forearm link
+DISTURBANCE_START_TIME = 15.0                       # [s] into simulation
+DISTURBANCE_DURATION   = 2.0                        # [s] the force lasts
+DISTURBANCE_FORCE      = np.array([0.0, 0.0, 30.0]) # world-frame [N]
 
 # ── Tool setup A: workbench sphere (scene_2.xml + panda_3.xml) ────────
 # sphere_patch world position: workbench pos (0.5545,0,0) + local (0,0,0.175)

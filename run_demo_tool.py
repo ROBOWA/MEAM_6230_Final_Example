@@ -29,6 +29,7 @@ from src.sphere_surface import SphereSurface
 from src.ds_tool import PolishingDSTool
 from src.sim_env_tool import SimEnvTool
 from src.controller_tool import PolishingControllerTool
+from src.disturbance import Disturbance
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -77,14 +78,29 @@ def run():
     log_sigma = np.zeros(max_steps)
     log_force = np.zeros(max_steps)
     log_dist  = np.zeros(max_steps)
+    log_disturb = np.zeros(max_steps, dtype=bool)
 
     C = config.SPHERE_CENTER_TOOL
     R = config.SPHERE_RADIUS_TOOL
+
+    # ── Disturbance ───────────────────────────────────────────────────
+    disturbance = Disturbance(
+        env.model,
+        body_name  = getattr(config, "DISTURBANCE_BODY_NAME",  "link5"),
+        start_time = getattr(config, "DISTURBANCE_START_TIME", 15.0),
+        duration   = getattr(config, "DISTURBANCE_DURATION",   2.0),
+        force      = getattr(config, "DISTURBANCE_FORCE",      np.zeros(3)),
+        enabled    = getattr(config, "DISTURBANCE_ENABLE",     False),
+    )
 
     print(f"Starting tool demo: {config.SIM_DURATION:.0f} s  |  dt={dt*1000:.1f} ms")
     print(f"Sphere: center={C}, R={R} m  (top z={C[2]+R:.3f} m)")
     print(f"Target force: {config.FORCE_DESIRED_TOOL} N  "
           f"|  orbit r={config.DS_R_CIRCLE_TOOL} m")
+    if disturbance.enabled:
+        print(f"Disturbance: body='{disturbance.body_name}'  "
+              f"t=[{disturbance.start_time:.1f}, {disturbance.end_time:.1f}] s  "
+              f"F={disturbance.force} N")
     print("Close the viewer window to abort early.\n")
 
     with mujoco.viewer.launch_passive(env.model, env.data) as viewer:
@@ -100,6 +116,10 @@ def run():
             step_wall = time.time()
 
             v_d, n, sigma, contact_state, _, fn = ctrl.step()
+
+            # External disturbance (applied to body COM, world-frame force)
+            disturb_active = disturbance.apply(env.data, step * dt)
+
             env.step()
 
             # Debug arrows: tool z-axis (red) and outward normal (green)
@@ -115,11 +135,12 @@ def run():
             viewer.sync()
 
             ee = env.ee_pos()
-            log_t[step]     = step * dt
-            log_pos[step]   = ee
-            log_sigma[step] = sigma
-            log_force[step] = fn
-            log_dist[step]  = sphere.signed_dist(ee, 0.0)
+            log_t[step]       = step * dt
+            log_pos[step]     = ee
+            log_sigma[step]   = sigma
+            log_force[step]   = fn
+            log_dist[step]    = sphere.signed_dist(ee, 0.0)
+            log_disturb[step] = disturb_active
 
             elapsed = time.time() - step_wall
             if dt - elapsed > 0:
@@ -136,7 +157,9 @@ def run():
     dist_l  = log_dist[:steps_done]
 
     _plot_results(t, pos, sigma_l, force_l, dist_l, C, R,
-                  config.FORCE_DESIRED_TOOL)
+                  config.FORCE_DESIRED_TOOL,
+                  r_cyl=config.TOOL_CYL_RADIUS, r_circle=config.DS_R_CIRCLE_TOOL,
+                  disturbance=disturbance)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -166,7 +189,8 @@ def _add_arrow(scn, pos, direction, length, radius, rgba):
 
 
 # ──────────────────────────────────────────────────────────────────────
-def _plot_results(t, pos, sigma, force, dist, C, R, F_d):
+def _plot_results(t, pos, sigma, force, dist, C, R, F_d, r_cyl=0.0, r_circle=0.03,
+                  disturbance=None):
     fig = plt.figure(figsize=(15, 10))
     fig.suptitle("DS Tool Polishing Demo", fontsize=14, fontweight="bold")
 
@@ -181,10 +205,22 @@ def _plot_results(t, pos, sigma, force, dist, C, R, F_d):
     ax2 = fig.add_subplot(2, 3, 2)
     ax2.scatter(pos[:, 0], pos[:, 1], c=t, cmap="plasma", s=1)
     theta = np.linspace(0, 2*np.pi, 200)
-    ax2.plot(C[0] + R*np.cos(theta), C[1] + R*np.sin(theta),
-             "k--", lw=0.8, label="sphere equator")
+    # Limit-cycle circle in the orbit plane
+    ax2.plot(C[0] + r_circle*np.cos(theta), C[1] + r_circle*np.sin(theta),
+             "r-", lw=1.2, label=f"limit cycle  r={r_circle*1e3:.0f} mm")
+    # Sphere cross-section at orbit height
+    R_eff = np.sqrt(max(R**2 - r_cyl**2, 0.0))
+    z_off = np.sqrt(max(R_eff**2 - r_circle**2, 0.0))
+    orbit_z = C[2] + z_off
+    if z_off < R:
+        r_cut = np.sqrt(R**2 - z_off**2)
+        ax2.plot(C[0] + r_cut*np.cos(theta), C[1] + r_cut*np.sin(theta),
+                 "k--", lw=0.8, label=f"sphere at z={orbit_z:.3f} m")
+    pad = r_circle * 1.5
+    ax2.set_xlim(C[0] - pad, C[0] + pad)
+    ax2.set_ylim(C[1] - pad, C[1] + pad)
     ax2.set_aspect("equal"); ax2.set_xlabel("x [m]"); ax2.set_ylabel("y [m]")
-    ax2.set_title("Tool Trajectory (top view)"); ax2.legend(fontsize=7)
+    ax2.set_title(f"Polishing Orbit  (z = {orbit_z:.3f} m)"); ax2.legend(fontsize=7)
 
     ax3 = fig.add_subplot(2, 3, 3)
     ax3.plot(t, dist * 1e3, lw=0.8)
@@ -198,8 +234,13 @@ def _plot_results(t, pos, sigma, force, dist, C, R, F_d):
     ax4.plot(t, force, lw=0.4, alpha=0.3, color="tab:blue", label="Raw FT $F_n$")
     ax4.plot(t, flt,   lw=1.2, color="tab:blue", label="Filtered $F_n$")
     ax4.axhline(F_d, color="r", ls="--", lw=1.2, label=f"F_d = {F_d} N")
+    if disturbance is not None and disturbance.enabled:
+        ax4.axvspan(disturbance.start_time, disturbance.end_time,
+                    alpha=0.15, color="tab:orange",
+                    label=f"disturbance [{disturbance.body_name}]  "
+                          f"{disturbance.force} N")
     ax4.set_xlabel("time [s]"); ax4.set_ylabel("Force [N]")
-    ax4.set_title("Normal Contact Force (FT sensor)"); ax4.legend()
+    ax4.set_title("Normal Contact Force (FT sensor)"); ax4.legend(fontsize=7)
 
     ax5 = fig.add_subplot(2, 3, 5)
     ax5.plot(t, sigma, lw=0.8, color="tab:orange")

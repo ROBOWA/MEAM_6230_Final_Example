@@ -42,7 +42,7 @@
             material="sphere_mat"
             contype="3" conaffinity="3"
             solref="0.050 1.5" solimp="0.9 0.99 0.001"
-            margin="0.001"
+            margin="0.00"
             condim="3"
             friction="0.8 0.02 0.001"/>
     </body>

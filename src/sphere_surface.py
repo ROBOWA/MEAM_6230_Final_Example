@@ -42,6 +42,6 @@ class SphereSurface:
         """True if p projects into the 3/8-sphere polishing region."""
         return self.polar_angle(p) <= self.max_polar
 
-    def attractor_point(self):
-        """Contact-surface point at the top of the sphere (circle center)."""
-        return self.c + np.array([0.0, 0.0, self.R])
+    def attractor_point(self, r_tool=0.0):
+        """Contact-surface point at the top of the offset sphere (circle center)."""
+        return self.c + np.array([0.0, 0.0, self.R + r_tool])

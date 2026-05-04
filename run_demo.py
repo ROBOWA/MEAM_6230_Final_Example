@@ -29,6 +29,7 @@ from src.sphere_surface import SphereSurface
 from src.ds import PolishingDS
 from src.sim_env import SimEnv
 from src.controller import PolishingController
+from src.disturbance import Disturbance
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -77,10 +78,25 @@ def run():
     log_sigma = np.zeros(max_steps)          # contact weight
     log_force = np.zeros(max_steps)          # normal contact force [N]
     log_dist = np.zeros(max_steps)           # signed surface distance [m]
+    log_disturb = np.zeros(max_steps, dtype=bool)  # disturbance active flag
+
+    # ── Disturbance ───────────────────────────────────────────────────
+    disturbance = Disturbance(
+        env.model,
+        body_name  = getattr(config, "DISTURBANCE_BODY_NAME",  "link5"),
+        start_time = getattr(config, "DISTURBANCE_START_TIME", 15.0),
+        duration   = getattr(config, "DISTURBANCE_DURATION",   2.0),
+        force      = getattr(config, "DISTURBANCE_FORCE",      np.zeros(3)),
+        enabled    = getattr(config, "DISTURBANCE_ENABLE",     False),
+    )
 
     print(f"Starting demo: {config.SIM_DURATION:.0f} s  |  dt={dt*1000:.1f} ms")
     print(f"Sphere: center={config.SPHERE_CENTER}, R={config.SPHERE_RADIUS} m")
     print(f"Target force: {config.FORCE_DESIRED} N  |  circle r={config.DS_R_CIRCLE} m")
+    if disturbance.enabled:
+        print(f"Disturbance: body='{disturbance.body_name}'  "
+              f"t=[{disturbance.start_time:.1f}, {disturbance.end_time:.1f}] s  "
+              f"F={disturbance.force} N")
     print("Close the viewer window to abort early.\n")
 
     # ── Simulation loop ───────────────────────────────────────────────
@@ -99,6 +115,9 @@ def run():
 
             # Controller step
             v_d, n, sigma, contact_state, _, _ = ctrl.step()
+
+            # External disturbance (applied to body COM, world-frame force)
+            disturb_active = disturbance.apply(env.data, step * dt)
 
             # Simulation step
             env.step()
@@ -120,11 +139,12 @@ def run():
             F_n = env.contact_normal_force()
             d = sphere.signed_dist(ee, config.TOOL_RADIUS)
 
-            log_t[step] = step * dt
-            log_pos[step] = ee
-            log_sigma[step] = sigma
-            log_force[step] = F_n
-            log_dist[step] = d
+            log_t[step]       = step * dt
+            log_pos[step]     = ee
+            log_sigma[step]   = sigma
+            log_force[step]   = F_n
+            log_dist[step]    = d
+            log_disturb[step] = disturb_active
 
             # Real-time pacing
             elapsed = time.time() - step_wall
@@ -141,17 +161,20 @@ def run():
     # ── Post-simulation plots ─────────────────────────────────────────
     t = log_t[:steps_done]
     pos = log_pos[:steps_done]
-    sigma_log = log_sigma[:steps_done]
-    force_log = log_force[:steps_done]
-    dist_log = log_dist[:steps_done]
+    sigma_log   = log_sigma[:steps_done]
+    force_log   = log_force[:steps_done]
+    dist_log    = log_dist[:steps_done]
 
     _plot_results(t, pos, sigma_log, force_log, dist_log,
                   config.SPHERE_CENTER, config.SPHERE_RADIUS,
-                  config.FORCE_DESIRED)
+                  config.FORCE_DESIRED,
+                  r_tool=config.TOOL_RADIUS, r_circle=config.DS_R_CIRCLE,
+                  disturbance=disturbance)
 
 
 # ──────────────────────────────────────────────────────────────────────
-def _plot_results(t, pos, sigma, force, dist, c, R, F_d):
+def _plot_results(t, pos, sigma, force, dist, c, R, F_d, r_tool=0.0, r_circle=0.05,
+                  disturbance=None):
     fig = plt.figure(figsize=(15, 10))
     fig.suptitle("DS-Based Surface Polishing Demo", fontsize=14, fontweight="bold")
 
@@ -164,14 +187,26 @@ def _plot_results(t, pos, sigma, force, dist, c, R, F_d):
     ax3d.set_title("EE Trajectory on Sphere")
     ax3d.set_xlabel("x [m]"); ax3d.set_ylabel("y [m]"); ax3d.set_zlabel("z [m]")
 
-    # 2. XY trajectory (top view)
+    # 2. Orbit plane (z = orbit height), limit-cycle reference
     ax2 = fig.add_subplot(2, 3, 2)
     ax2.scatter(pos[:, 0], pos[:, 1], c=t, cmap="plasma", s=1)
     theta = np.linspace(0, 2 * np.pi, 200)
-    ax2.plot(c[0] + R * np.cos(theta), c[1] + R * np.sin(theta),
-             "k--", lw=0.8, label="sphere equator")
+    # Limit-cycle circle in the orbit plane
+    ax2.plot(c[0] + r_circle * np.cos(theta), c[1] + r_circle * np.sin(theta),
+             "r-", lw=1.2, label=f"limit cycle  r={r_circle*1e3:.0f} mm")
+    # Sphere cross-section at orbit height (only if orbit z-offset lies inside sphere)
+    R_eff = R + r_tool
+    z_off = np.sqrt(max(R_eff**2 - r_circle**2, 0.0))
+    orbit_z = c[2] + z_off
+    if z_off < R:
+        r_cut = np.sqrt(R**2 - z_off**2)
+        ax2.plot(c[0] + r_cut * np.cos(theta), c[1] + r_cut * np.sin(theta),
+                 "k--", lw=0.8, label=f"sphere at z={orbit_z:.3f} m")
+    pad = r_circle * 1.5
+    ax2.set_xlim(c[0] - pad, c[0] + pad)
+    ax2.set_ylim(c[1] - pad, c[1] + pad)
     ax2.set_aspect("equal"); ax2.set_xlabel("x [m]"); ax2.set_ylabel("y [m]")
-    ax2.set_title("EE Trajectory (top view)"); ax2.legend(fontsize=7)
+    ax2.set_title(f"Polishing Orbit  (z = {orbit_z:.3f} m)"); ax2.legend(fontsize=7)
 
     # 3. Signed surface distance
     ax3 = fig.add_subplot(2, 3, 3)
@@ -187,8 +222,13 @@ def _plot_results(t, pos, sigma, force, dist, c, R, F_d):
     ax4.plot(t, force, lw=0.4, alpha=0.3, color="tab:blue", label="Raw $F_n$")
     ax4.plot(t, force_filt, lw=1.2, color="tab:blue", label="Filtered $F_n$ (LP 5 Hz)")
     ax4.axhline(F_d, color="r", ls="--", lw=1.2, label=f"F_d = {F_d} N")
+    if disturbance is not None and disturbance.enabled:
+        ax4.axvspan(disturbance.start_time, disturbance.end_time,
+                    alpha=0.15, color="tab:orange",
+                    label=f"disturbance [{disturbance.body_name}]  "
+                          f"{disturbance.force} N")
     ax4.set_xlabel("time [s]"); ax4.set_ylabel("Force [N]")
-    ax4.set_title("Normal Contact Force"); ax4.legend()
+    ax4.set_title("Normal Contact Force"); ax4.legend(fontsize=7)
 
     # 5. Contact blend weight sigma
     ax5 = fig.add_subplot(2, 3, 5)

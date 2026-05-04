@@ -15,7 +15,7 @@ via a smoothstep over [0, d_blend]:
 import numpy as np
 
 class PolishingDS:
-    sigma_close = 0.98
+    sigma_close = 0.95
     def __init__(
         self,
         sphere,
@@ -44,8 +44,8 @@ class PolishingDS:
         self.k_limit = k_limit
         self.d_blend = d_blend
 
-        # Attractor: contact-surface point at the top of the sphere
-        self.p_att = sphere.attractor_point()
+        # Attractor: top of the offset sphere (tool center rides at R + r_tool)
+        self.p_att = sphere.attractor_point(self.r_tool)
 
     def compute(self, ee_pos):
         """
@@ -92,5 +92,6 @@ class PolishingDS:
             v_normal = normal_scale * (-self.v_target * n)
             v_d = v_normal + sigma * v_circ
         else:  
+            # v_d = np.max((1.0 - sigma), 0) * v_reach + sigma * v_circ
             v_d = (1.0 - sigma) * v_reach + sigma * v_circ
         return v_d, n, sigma
