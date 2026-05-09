@@ -6,8 +6,17 @@ Control law (Cartesian torque):
 
 where:
   J     — 3×7 linear Jacobian at the EE site
-  D     — 3×3 positive-definite damping matrix (anisotropic: d_n in normal, d_t tangential)
-  v_d   — desired EE linear velocity from DS + depth spring + force modulation
+  D     — 3×3 positive-definite damping matrix, constructed from the nominal DS direction:
+              D = d_n I + (d_t - d_n) e1 e1^T
+          where e1 = v_nom / ||v_nom||.
+          d_t is the high tracking damping along the nominal DS direction.
+          d_n is the damping in the perpendicular subspace, which includes the surface
+          normal when the nominal DS is tangential to the surface near contact.
+  v_d   — desired EE velocity: nominal DS velocity plus a force modulation term
+              v_d = v_nom + f_force
+          where f_force = -(F_des_normal / d_n) n (near/contact only).
+          Because the nominal DS is tangential near contact, n lies in the perpendicular
+          eigenspace with eigenvalue d_n, so the steady-state contact force is F_des_normal.
   v_ee  — actual EE linear velocity = J @ q̇
   g(q)  — gravity + Coriolis (from data.qfrc_bias)
 
@@ -62,6 +71,9 @@ class PolishingController:
         # Ramp state — counts time in contact to linearly scale F_preload→F_d
         self._contact_ramp_t = 0.0
 
+        # Persistent eigenvector for continuity of D across steps
+        self._last_e1 = None
+
         # Filter state — raw MuJoCo contact force low-pass
         self.normal_force_filt = 0.0
         self.force_filter_alpha = 0.1   # EMA coefficient (smaller = smoother)
@@ -73,6 +85,7 @@ class PolishingController:
         self.env.data.ctrl[:self._n_joints] = 0.0
         self._contact_ramp_t = 0.0
         self.normal_force_filt = 0.0
+        self._last_e1 = None
 
     # ------------------------------------------------------------------
     def step(self):
@@ -84,9 +97,11 @@ class PolishingController:
 
         # ── 1. DS desired velocity ─────────────────────────────────────
         v_d, n, sigma = self.ds.compute(ee_pos)
+        v_nom = v_d.copy()   # nominal DS velocity before force modulation
 
         # ── 2. Contact surface following ───────────────────────────────
-        # Normal velocity = F_des_filt / d_n  (paper-style force modulation).
+        # Force modulation adds an inward normal velocity component so that
+        # D · (v_d - v_ee) generates the desired contact force.
         # Three states: far (DS only), preload (approaching), contact (full F_d).
 
         # 2a. Filter raw contact force measurement (EMA to reduce MuJoCo noise).
@@ -101,8 +116,6 @@ class PolishingController:
             normal_force = None
 
         # 2b. Determine contact state and raw desired normal force.
-        v_d_tan = v_d - np.dot(v_d, n) * n    # tangential DS component (always cheap)
-
         if sigma <= self.sigma_close:
             contact_state = "far"
             F_des_normal = 0.0
@@ -124,27 +137,45 @@ class PolishingController:
                 F_des_normal = self.F_preload
                 self._contact_ramp_t = 0.0
 
+        # 2c. Add force modulation on top of nominal DS (Scheme C).
+        # Near/contact: inject an inward normal velocity component so that
+        # D generates the desired contact force.  The nominal DS is tangential
+        # near contact, so n lies in the perpendicular eigenspace (eigenvalue d_n)
+        # and f_force = v_d_n_cmd * (-n) produces F_des_normal in steady state.
         if sigma > self.sigma_close:
             v_d_n_cmd = F_des_normal / self.d_n
-            # Force feedback correction: when k_force_fb > 0, adjust pressing
-            # velocity to compensate for the measured force error.  This corrects
-            # the extra contact force injected by d_t coupling through J^T on a
-            # curved surface, letting d_t stay high (for orbit tracking) without
-            # inflating the steady-state contact force.
+
             if self.k_force_fb > 0.0 and normal_force is not None and contact_state == "contact":
                 f_err = self.F_d - normal_force
                 v_d_n_cmd += self.k_force_fb * f_err
-            v_d = v_d_tan + v_d_n_cmd * (-n)
+
+            f_force = v_d_n_cmd * (-n)
+            v_d = v_nom + f_force
 
         # Speed limit
         spd = np.linalg.norm(v_d)
         if spd > 0.15:
             v_d = v_d * (0.15 / spd)
 
-        # ── 3. Damping matrix D (anisotropic) ─────────────────────────
-        # Higher damping in the surface-normal direction for force regulation.
-        n_dir = n
-        D = self.d_t * np.eye(3) + (self.d_n - self.d_t) * np.outer(n_dir, n_dir)
+        # ── 3. Damping matrix D (nominal-DS frame) ─────────────────────
+        # D = d_n I + (d_t - d_n) e1 e1^T
+        # e1 tracks the nominal DS direction for continuity across steps.
+        eps = 1e-9
+        norm_nom = np.linalg.norm(v_nom)
+
+        if norm_nom > eps:
+            e1 = v_nom / norm_nom
+            if self._last_e1 is not None and np.dot(e1, self._last_e1) < 0.0:
+                e1 = -e1
+        else:
+            if self._last_e1 is not None:
+                e1 = self._last_e1
+            else:
+                e1 = -n
+
+        self._last_e1 = e1
+
+        D = self.d_n * np.eye(3) + (self.d_t - self.d_n) * np.outer(e1, e1)
 
         # ── 4. Current EE velocity ─────────────────────────────────────
         v_ee = J @ qd
