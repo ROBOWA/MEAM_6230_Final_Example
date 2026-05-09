@@ -39,7 +39,7 @@ Q_INIT = np.array([0.0, -0.4, 0.0, -1.9, 0.0, 1, 0.785])
 SIM_DURATION = 35.0   # total demo duration [s]
 
 # ── Disturbance (external force, simulates human interaction) ─────────
-DISTURBANCE_ENABLE     = False                        # whether to apply disturbance force
+DISTURBANCE_ENABLE     = True                        # whether to apply disturbance force
 DISTURBANCE_BODY_NAME  = "link6"                    # body whose COM receives the force
 DISTURBANCE_START_TIME = 10.0                        # [s] when force is applied
 DISTURBANCE_DURATION   = 2.0                         # [s] how long force lasts
