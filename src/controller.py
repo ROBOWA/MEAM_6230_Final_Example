@@ -1,15 +1,34 @@
 """
-Passive DS Impedance Controller (no tank energy).
+Passive DS Impedance Controller — strict paper formulation with energy tank.
 
 Control law (Cartesian torque):
     τ = J^T · D · (v_d − v_ee) + g(q)
 
-where:
-  J     — 3×7 linear Jacobian at the EE site
-  D     — 3×3 positive-definite damping matrix (anisotropic: d_n in normal, d_t tangential)
-  v_d   — desired EE linear velocity from DS + depth spring + force modulation
-  v_ee  — actual EE linear velocity = J @ q̇
-  g(q)  — gravity + Coriolis (from data.qfrc_bias)
+DS decomposition (Amanhoud RSS 2019, App. B):
+    f_c = 0          (polishing orbit is fully non-conservative)
+    f_r = f_motion   (orbit DS component)
+    f_n = f_force    (normal force modulation = −(F_des/λ₁)·n)
+
+Energy tank (state s, energy T = s):
+    p_r = λ₁·(v_ee·f_r)      power drawn by orbit component
+    p_n = λ₁·(v_ee·f_n)      power drawn by force component
+    p_d = v_ee^T D v_ee ≥ 0  power dissipated by damping  → charges tank
+
+    β_i   = 0 if (s≤0 and p_i>ε) or (s≥s_max and p_i<−ε), else 1
+    β_i'  = 1 if p_i < −ε,  else β_i           (always allow back-injection)
+
+    v_d   = f_c + β_r'·f_r + β_n'·f_n          (gated desired velocity)
+
+    α     = υ⁻(s, s_max−Δs, s_max)             (stop charging when full)
+    ṡ     = α·p_d − β_r·p_r − β_n·p_n
+    s     = clip(s + dt·ṡ, 0, s_max)
+
+Paper-style damping matrix (built from gated v_d):
+    e1 = v_d/‖v_d‖,  E = [e1, e2, e3]
+    D  = E · diag(λ₁, λ⊥, λ⊥) · Eᵀ
+
+λ₁  is the damping along v_d.
+λ⊥  is the damping in the plane perpendicular to v_d.
 
 Additionally a joint-space null-space stiffness prevents drift to joint limits.
 """
@@ -24,28 +43,45 @@ class PolishingController:
         sphere,
         ds,
         q_ref,
-        F_d=5.0,
-        d_n=400.0,       # normal damping [N·s/m]
-        d_t=600.0,       # tangential damping [N·s/m]
-        k_null=5.0,      # null-space joint stiffness [N·m/rad]
-        b_null=5.0,      # null-space joint damping [N·m·s/rad]
+        F_d=15.0,
+        lambda_1=None,       # damping along final desired DS direction [N·s/m]
+        lambda_perp=None,    # damping perpendicular to DS direction [N·s/m]
+        d_n=400.0,           # backward-compat alias for lambda_1
+        d_t=600.0,           # backward-compat alias for lambda_perp
+        k_null=5.0,          # null-space joint stiffness [N·m/rad]
+        b_null=5.0,          # null-space joint damping [N·m·s/rad]
         dls_lambda=0.02,
-        F_preload=1,       # approach preload force [N]
+        F_preload=1,         # approach preload force [N]
         force_tol=3.0,       # measured force threshold for contact detection [N]
-        sigma_close=0.9,    # sigma above which force modulation begins
+        sigma_close=0.95,     # sigma above which force modulation begins
         sigma_contact=0.98,  # sigma above which full polishing force is used (fallback)
-        use_force_feedback=False,  # use env.contact_normal_force() for contact detection
-        force_ramp_time=2.0,    # time [s] to linearly ramp F_preload → F_d after contact
-        k_force_fb=0.0,      # force-feedback gain [m/(s·N)]: adjusts v_d_n to correct
-                             # measured-force error; compensates d_t coupling artefact
+        use_force_feedback=False,
+        force_ramp_time=2.0, # time [s] to ramp F_preload → F_d after contact
+        k_force_fb=0.0,
+        # ── Energy tank (Amanhoud RSS 2019 App. B) ────────────────────
+        use_energy_tank=True,
+        tank_s_max=60.0,     # maximum tank level [J]
+        tank_delta_ratio=0.1,# width of the upper saturation ramp as fraction of s_max
+        tank_init="full",    # initial tank level: "full", "empty", "half", or float
+        power_eps=1e-8,      # threshold for power sign detection [W]
     ):
         self.env = env
         self.sphere = sphere
         self.ds = ds
         self.q_ref = np.asarray(q_ref, dtype=float)
         self.F_d = F_d
-        self.d_n = d_n
-        self.d_t = d_t
+
+        # Paper-style damping eigenvalues (backward-compat: fall back to d_n, d_t).
+        if lambda_1 is None:
+            lambda_1 = d_t
+        if lambda_perp is None:
+            lambda_perp = d_n
+        self.lambda_1 = lambda_1
+        self.lambda_perp = lambda_perp
+        # Mirror onto old names so external code reading d_n/d_t still works.
+        self.d_n = self.lambda_1
+        self.d_t = self.lambda_perp
+
         self.k_null = k_null
         self.b_null = b_null
         self.dls_lambda = dls_lambda
@@ -59,20 +95,45 @@ class PolishingController:
         self.dt = env.model.opt.timestep
         self._n_joints = env.N_JOINTS
 
-        # Ramp state — counts time in contact to linearly scale F_preload→F_d
+        # Ramp state — counts time in contact to linearly scale F_preload→F_d.
         self._contact_ramp_t = 0.0
 
-        # Filter state — raw MuJoCo contact force low-pass
+        # Filter state — raw MuJoCo contact force low-pass.
         self.normal_force_filt = 0.0
-        self.force_filter_alpha = 0.1   # EMA coefficient (smaller = smoother)
+        self.force_filter_alpha = 0.1
 
-        # Torque limits
+        # Torque limits.
         self._tau_max = np.array([87, 87, 87, 87, 12, 12, 12], dtype=float)
 
+        # Previous first eigenvector for zero-velocity fallback in damping construction.
+        self._last_e1 = None
+
+        # ── Energy tank ───────────────────────────────────────────────
+        self.use_energy_tank = use_energy_tank
+        self.tank_s_max = float(tank_s_max)
+        self.tank_delta_s = tank_delta_ratio * self.tank_s_max
+        self.power_eps = power_eps
+
+        if isinstance(tank_init, str):
+            _init_map = {"full": self.tank_s_max, "empty": 0.0,
+                         "half": self.tank_s_max / 2.0}
+            if tank_init not in _init_map:
+                raise ValueError(f"tank_init must be 'full', 'empty', 'half', or float; got '{tank_init}'")
+            s0 = _init_map[tank_init]
+        else:
+            s0 = float(tank_init)
+        self.tank_s = s0
+        self._tank_s_init = s0
+        self.last_tank_info = {}
+
+    # ------------------------------------------------------------------
     def reset(self):
         self.env.data.ctrl[:self._n_joints] = 0.0
         self._contact_ramp_t = 0.0
         self.normal_force_filt = 0.0
+        self._last_e1 = None
+        self.tank_s = self._tank_s_init
+        self.last_tank_info = {}
 
     # ------------------------------------------------------------------
     def step(self):
@@ -82,14 +143,10 @@ class PolishingController:
         qd = self.env.qvel()
         J = self.env.jacobian()          # 3×7
 
-        # ── 1. DS desired velocity ─────────────────────────────────────
-        v_d, n, sigma = self.ds.compute(ee_pos)
+        # ── 1. Nominal motion from DS ──────────────────────────────────
+        f_motion, n, sigma = self.ds.compute(ee_pos)
 
-        # ── 2. Contact surface following ───────────────────────────────
-        # Normal velocity = F_des_filt / d_n  (paper-style force modulation).
-        # Three states: far (DS only), preload (approaching), contact (full F_d).
-
-        # 2a. Filter raw contact force measurement (EMA to reduce MuJoCo noise).
+        # ── 2. Filter raw contact force (EMA to reduce MuJoCo noise) ──
         raw_force = self._estimate_normal_force()
         if raw_force is not None:
             self.normal_force_filt = (
@@ -100,9 +157,7 @@ class PolishingController:
         else:
             normal_force = None
 
-        # 2b. Determine contact state and raw desired normal force.
-        v_d_tan = v_d - np.dot(v_d, n) * n    # tangential DS component (always cheap)
-
+        # ── 3. Determine contact state and desired normal force ────────
         if sigma <= self.sigma_close:
             contact_state = "far"
             F_des_normal = 0.0
@@ -124,64 +179,171 @@ class PolishingController:
                 F_des_normal = self.F_preload
                 self._contact_ramp_t = 0.0
 
-        if sigma > self.sigma_close:
-            v_d_n_cmd = F_des_normal / self.d_n
-            # Force feedback correction: when k_force_fb > 0, adjust pressing
-            # velocity to compensate for the measured force error.  This corrects
-            # the extra contact force injected by d_t coupling through J^T on a
-            # curved surface, letting d_t stay high (for orbit tracking) without
-            # inflating the steady-state contact force.
-            if self.k_force_fb > 0.0 and normal_force is not None and contact_state == "contact":
-                f_err = self.F_d - normal_force
-                v_d_n_cmd += self.k_force_fb * f_err
-            v_d = v_d_tan + v_d_n_cmd * (-n)
+        force_active = sigma > self.sigma_close
 
-        # Speed limit
-        spd = np.linalg.norm(v_d)
+        # ── 4. DS decomposition (Amanhoud RSS 2019 App. B) ────────────
+        # f_c = 0: the polishing orbit DS is fully non-conservative, so
+        #          there is no conservative component.
+        # f_r = f_motion: orbit motion (tangential, speed-limited).
+        # f_n = f_force:  surface-normal force modulation.
+        #
+        # Force term uses λ₁ (the damping eigenvalue along v_d) per the
+        # paper identity D·v_d = λ₁·v_d when e1 ∥ v_d.  The power
+        # computation pn = λ₁·(v_ee·f_n) uses the same λ₁ consistently.
+
+        # Speed-limit orbit component before gating.
+        spd = np.linalg.norm(f_motion)
         if spd > 0.15:
-            v_d = v_d * (0.15 / spd)
+            f_motion = f_motion * (0.15 / spd)
 
-        # ── 3. Damping matrix D (anisotropic) ─────────────────────────
-        # Higher damping in the surface-normal direction for force regulation.
-        n_dir = n
-        D = self.d_t * np.eye(3) + (self.d_n - self.d_t) * np.outer(n_dir, n_dir)
+        f_c = np.zeros(3)
+        f_r = f_motion
+        f_n = -(F_des_normal / self.lambda_1) * n if force_active else np.zeros(3)
 
-        # ── 4. Current EE velocity ─────────────────────────────────────
+        # ── 5. Current EE Cartesian velocity ───────────────────────────
         v_ee = J @ qd
 
-        # ── 5. Cartesian impedance force ───────────────────────────────
+        # ── 6–11. Energy tank gating ───────────────────────────────────
+        if self.use_energy_tank:
+            # Power drawn from tank by each DS component
+            # (positive p_i = energy flows from tank to robot via that component).
+            pr = self.lambda_1 * np.dot(v_ee, f_r)
+            pn = self.lambda_1 * np.dot(v_ee, f_n)
+
+            # β_i: gate that prevents the tank from draining below 0 or
+            #       filling above s_max.
+            def _beta(pi):
+                if self.tank_s <= 0.0 and pi > self.power_eps:
+                    return 0.0   # tank empty; block energy withdrawal
+                if self.tank_s >= self.tank_s_max and pi < -self.power_eps:
+                    return 0.0   # tank full; block further injection
+                return 1.0
+
+            # β_i': always allow a component that injects energy back into
+            #        the tank (braking/returning phase); otherwise use β_i.
+            def _beta_prime(pi, bi):
+                return 1.0 if pi < -self.power_eps else bi
+
+            beta_r = _beta(pr)
+            beta_n = _beta(pn)
+            beta_r_prime = _beta_prime(pr, beta_r)
+            beta_n_prime = _beta_prime(pn, beta_n)
+
+            # Gated desired velocity (step 8 per spec).
+            v_d = f_c + beta_r_prime * f_r + beta_n_prime * f_n
+
+            # Build D from gated v_d (step 9).
+            D, _ = self._construct_passive_ds_damping(v_d, n, force_active)
+
+            # Dissipated power (always ≥ 0, charges the tank).
+            pd = float(v_ee @ D @ v_ee)
+
+            # α ramps to 0 as s approaches s_max to prevent overfill.
+            alpha = self._upsilon_minus(
+                self.tank_s,
+                self.tank_s_max - self.tank_delta_s,
+                self.tank_s_max,
+            )
+
+            # Euler update; clip to valid range.
+            ds_tank = self.dt * (alpha * pd - beta_r * pr - beta_n * pn)
+            self.tank_s = float(np.clip(self.tank_s + ds_tank, 0.0, self.tank_s_max))
+
+            self.last_tank_info = {
+                "tank_s":       self.tank_s,
+                "pr":           pr,
+                "pn":           pn,
+                "pd":           pd,
+                "alpha":        alpha,
+                "beta_r":       beta_r,
+                "beta_n":       beta_n,
+                "beta_r_prime": beta_r_prime,
+                "beta_n_prime": beta_n_prime,
+                "ds_tank":      ds_tank,
+            }
+
+        else:
+            # Tank disabled: pass all components through unmodified.
+            v_d = f_c + f_r + f_n
+            D, _ = self._construct_passive_ds_damping(v_d, n, force_active)
+            self.last_tank_info = {}
+
+        # ── 12. Cartesian impedance force ──────────────────────────────
         F_cart = D @ (v_d - v_ee)
 
-        # ── 6. Map to joint torques ────────────────────────────────────
+        # ── 13. Map to joint torques ───────────────────────────────────
         tau = J.T @ F_cart
 
-        # ── 7. Gravity + Coriolis + joint-damping compensation ──────────
-        # qfrc_bias = gravity + Coriolis only; qfrc_passive (joint damping)
-        # is NOT included and must be cancelled so it doesn't stall the orbit.
+        # ── 14. Gravity + Coriolis + joint-damping compensation ────────
+        # qfrc_bias = gravity + Coriolis; qfrc_passive (joint damping)
+        # is cancelled so it does not stall the orbit.
         tau += self.env.data.qfrc_bias[:self._n_joints]
         tau -= self.env.data.qfrc_passive[:self._n_joints]
 
-        # ── 8. Null-space: joint stiffness/damping toward q_ref ───────
+        # ── 15. Null-space: joint stiffness/damping toward q_ref ───────
         J_pinv = self._dls_pinv(J)
         N = np.eye(self._n_joints) - J_pinv @ J
         tau_null = N @ (self.k_null * (self.q_ref - q) - self.b_null * qd)
         tau += tau_null
 
-        # ── 9. Clip and apply ──────────────────────────────────────────
+        # ── 16. Clip and apply ─────────────────────────────────────────
         tau = np.clip(tau, -self._tau_max, self._tau_max)
         self.env.data.ctrl[:self._n_joints] = tau
 
         return v_d, n, sigma, contact_state, F_des_normal, normal_force
 
     # ------------------------------------------------------------------
-    def _estimate_normal_force(self):
-        """Return measured normal contact force [N], always available.
+    def _construct_passive_ds_damping(self, v_d, n, force_active=False):
+        """Build paper-style damping matrix with first eigenvector e1 = v_d / ‖v_d‖.
 
-        Returns the held/decayed contact force so the force-feedback path
-        (k_force_fb > 0) and the contact-detection path (use_force_feedback)
-        both have a non-None reading.  The sigma-based fallback is used for
-        contact state detection when use_force_feedback is False.
+        λ₁  — damping along v_d (the final desired DS direction)
+        λ⊥  — damping in the plane perpendicular to v_d
         """
+        eps = 1e-9
+        norm_vd = np.linalg.norm(v_d)
+
+        if norm_vd < eps:
+            if force_active:
+                e1 = -n
+            elif self._last_e1 is not None:
+                e1 = self._last_e1
+            else:
+                e1 = np.array([1.0, 0.0, 0.0])
+        else:
+            e1 = v_d / norm_vd
+
+        # Coordinate axis least aligned with e1 → Gram-Schmidt for e2, e3.
+        axes = [np.array([1., 0., 0.]), np.array([0., 1., 0.]), np.array([0., 0., 1.])]
+        tmp = min(axes, key=lambda a: abs(np.dot(a, e1)))
+
+        e2 = tmp - np.dot(tmp, e1) * e1
+        e2 = e2 / np.linalg.norm(e2)
+        e3 = np.cross(e1, e2)
+
+        E = np.column_stack([e1, e2, e3])
+        Lambda = np.diag([self.lambda_1, self.lambda_perp, self.lambda_perp])
+        D = E @ Lambda @ E.T
+
+        self._last_e1 = e1
+        return D, E
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _upsilon_minus(x, x_low, x_high):
+        """Linear ramp from 1 (x ≤ x_low) down to 0 (x ≥ x_high).
+
+        Used to taper off the tank-charging coefficient α as the tank
+        approaches its maximum level, preventing overfill.
+        """
+        if x <= x_low:
+            return 1.0
+        if x >= x_high:
+            return 0.0
+        return (x_high - x) / (x_high - x_low)
+
+    # ------------------------------------------------------------------
+    def _estimate_normal_force(self):
+        """Return measured normal contact force [N]."""
         return self.env.contact_normal_force()
 
     # ------------------------------------------------------------------

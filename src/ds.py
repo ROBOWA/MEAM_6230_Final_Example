@@ -15,7 +15,7 @@ via a smoothstep over [0, d_blend]:
 import numpy as np
 
 class PolishingDS:
-    sigma_close = 0.98
+    sigma_close = 0.95
     def __init__(
         self,
         sphere,
