@@ -45,6 +45,13 @@ DISTURBANCE_START_TIME = 10.0                        # [s] when force is applied
 DISTURBANCE_DURATION   = 2.0                         # [s] how long force lasts
 DISTURBANCE_FORCE      = np.array([0.0, 0.0, 60.0])  # world-frame force [N]
 
+# ── Energy Tank ──────────────────────────────────────────────────────
+CTRL_USE_ENERGY_TANK = True
+CTRL_TANK_S0        = 1.0     # initial tank energy [J]
+CTRL_TANK_S_MAX     = 5.0     # max tank energy [J]
+CTRL_TANK_DELTA     = 0.5     # smooth shutoff interval near s_max [J]
+CTRL_D_SIDE         = CTRL_D_N  # sideways tangent damping = normal damping
+
 # ── Paths ─────────────────────────────────────────────────────────────
 import os
 _HERE = os.path.dirname(os.path.abspath(__file__))

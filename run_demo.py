@@ -1,13 +1,13 @@
 """
-DS-based Surface Polishing Demo
-================================
+DS-based Surface Polishing Demo  (with Energy Tank)
+=====================================================
 Franka Panda polishes the outer surface of a 3/8 sphere using:
   - A DS velocity field (reaching + circular limit-cycle on the tangent plane)
+  - Surface-frame passive impedance control with energy tank (MEAM 6230 final project)
   - Force modulation to maintain a desired contact force
-  - Operational-space velocity control via DLS Jacobian pseudo-inverse
 
 Run:
-    C:/Users/cindy/anaconda3/envs/ESE5030/python.exe run_demo.py
+    python run_demo.py
 """
 
 import sys
@@ -29,7 +29,7 @@ import config
 from src.sphere_surface import SphereSurface
 from src.ds import PolishingDS
 from src.sim_env import SimEnv
-from src.controller import PolishingController
+from src.controller_tank import PolishingControllerTank
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -68,17 +68,23 @@ def run():
         d_blend=config.DS_D_BLEND,
     )
 
-    ctrl = PolishingController(
+    ctrl = PolishingControllerTank(
         env, sphere, ds,
         q_ref=config.Q_INIT,
         F_d=config.FORCE_DESIRED,
         d_n=config.CTRL_D_N,
         d_t=config.CTRL_D_T,
+        d_side=getattr(config, "CTRL_D_SIDE", config.CTRL_D_N),
         k_null=config.CTRL_K_NULL,
         b_null=config.CTRL_B_NULL,
         dls_lambda=config.CTRL_DLS_LAMBDA,
+        v_max=getattr(config, "CTRL_V_MAX", 0.15),
         force_ramp_time=config.CTRL_FORCE_RAMP_TIME,
         k_force_fb=getattr(config, "CTRL_K_FORCE_FB", 0.0),
+        use_energy_tank=getattr(config, "CTRL_USE_ENERGY_TANK", True),
+        tank_s0=getattr(config, "CTRL_TANK_S0", 1.0),
+        tank_s_max=getattr(config, "CTRL_TANK_S_MAX", 5.0),
+        tank_delta=getattr(config, "CTRL_TANK_DELTA", 0.5),
     )
 
     # Initialise robot
@@ -97,33 +103,66 @@ def run():
 
     # ── Logging arrays ────────────────────────────────────────────────
     max_steps = int(config.SIM_DURATION / dt)
-    log_t          = np.zeros(max_steps)
-    log_pos        = np.zeros((max_steps, 3))  # EE position
-    log_sigma      = np.zeros(max_steps)       # contact weight
-    log_force      = np.zeros(max_steps)       # normal contact force [N]
-    log_dist       = np.zeros(max_steps)       # signed surface distance [m]
-    log_disturbance = np.zeros(max_steps, dtype=bool)  # disturbance active flag
+    log_t             = np.zeros(max_steps)
+    log_pos           = np.zeros((max_steps, 3))
+    log_sigma         = np.zeros(max_steps)
+    log_force         = np.zeros(max_steps)
+    log_dist          = np.zeros(max_steps)
+    log_disturbance   = np.zeros(max_steps, dtype=bool)
+    # Tank quantities
+    log_tank_s        = np.zeros(max_steps)
+    log_tank_alpha    = np.zeros(max_steps)
+    log_beta_t        = np.zeros(max_steps)
+    log_beta_n        = np.zeros(max_steps)
+    log_beta_t_prime  = np.zeros(max_steps)
+    log_beta_n_prime  = np.zeros(max_steps)
+    log_p_t           = np.zeros(max_steps)
+    log_p_n           = np.zeros(max_steps)
+    log_p_d           = np.zeros(max_steps)
+    log_motion_norm   = np.zeros(max_steps)
+    log_force_norm    = np.zeros(max_steps)
+    log_vd_norm       = np.zeros(max_steps)
+    log_F_des         = np.zeros(max_steps)
+    log_contact_num   = np.zeros(max_steps)   # far=0, preload=1, contact=2
+
+    _contact_to_num = {"far": 0, "preload": 1, "contact": 2}
 
     print(f"Starting demo: {config.SIM_DURATION:.0f} s  |  dt={dt*1000:.1f} ms")
     print(f"Sphere: center={config.SPHERE_CENTER}, R={config.SPHERE_RADIUS} m")
     print(f"Target force: {config.FORCE_DESIRED} N  |  circle r={config.DS_R_CIRCLE} m")
+    use_tank = getattr(config, "CTRL_USE_ENERGY_TANK", True)
+    print(f"Energy tank: {'ON' if use_tank else 'OFF'}  "
+          f"s0={ctrl.tank_s0:.1f}  s_max={ctrl.tank_s_max:.1f} J")
     if config.DISTURBANCE_ENABLE:
         print(f"Disturbance: body='{config.DISTURBANCE_BODY_NAME}'  "
               f"F={config.DISTURBANCE_FORCE} N  "
               f"t=[{config.DISTURBANCE_START_TIME}, "
               f"{config.DISTURBANCE_START_TIME + config.DISTURBANCE_DURATION}] s")
     print("Close the viewer window to abort early.\n")
+    print(f"{'t':>6}  {'s':>6}  {'β_t′':>6}  {'β_n′':>6}  "
+          f"{'p_t':>8}  {'p_n':>8}  {'p_d':>8}  state")
+    print("-" * 70)
 
-    # ── Trail & force-arrow visualization constants ───────────────────
-    _TRAIL_MAXLEN      = 2000   # ~2 s history at 1 kHz
-    _TRAIL_STRIDE      = 10     # draw 1-in-10 → ≤200 spheres per frame
-    _TRAIL_RADIUS      = 0.003  # trail sphere radius [m]
-    _FORCE_ARROW_SCALE = 0.008  # arrow length per N [m/N]
+    # ── Trail & arrow visualization constants ─────────────────────────
+    _TRAIL_MAXLEN          = 2000
+    _TRAIL_STRIDE          = 10
+    _TRAIL_RADIUS          = 0.003
+    _FORCE_ARROW_SCALE     = 0.008   # [m/N] for disturbance arrow
+    _VEL_ARROW_SCALE       = 0.3     # [m per m/s] for velocity arrows
+    _ARROW_THICKNESS       = 0.005
     _trail = deque(maxlen=_TRAIL_MAXLEN)
+
+    # ── Energy-tank bar constants ─────────────────────────────────────
+    # Vertical bar to the side of the sphere.  Bottom anchor, grow upward.
+    _TANK_BAR_ORIGIN = np.array([0.50, 0.32, 0.10])  # world-frame base
+    _TANK_BAR_MAX_H  = 0.22    # height [m] when tank is full
+    _TANK_BAR_HALF_W = 0.010   # half-width of bar [m]
+
+    tank_info = {}
+    _print_interval = max(1, int(1.0 / dt))  # print every ~1 s
 
     # ── Simulation loop ───────────────────────────────────────────────
     with mujoco.viewer.launch_passive(env.model, env.data) as viewer:
-        # Nice camera angle
         viewer.cam.azimuth = 150
         viewer.cam.elevation = -20
         viewer.cam.distance = 1.4
@@ -138,9 +177,9 @@ def run():
             sim_time = step * dt
 
             # Controller step
-            v_d, n, sigma, _, _, _ = ctrl.step()
+            v_d, n, sigma, contact_state, F_des, F_meas, tank_info = ctrl.step()
 
-            # Disturbance — applied before mj_step (inside env.step)
+            # Disturbance
             active = apply_external_disturbance(env, disturbance_body_id, sim_time)
             if active and not _was_disturbed:
                 print(f"  [t={sim_time:.2f}s] Disturbance ON  "
@@ -150,34 +189,50 @@ def run():
                 print(f"  [t={sim_time:.2f}s] Disturbance OFF")
             _was_disturbed = active
 
+            # Periodic tank status print (every ~1 s)
+            if step % _print_interval == 0:
+                ti = tank_info
+                nf = ti.get("normal_force") or 0.0
+                print(
+                    f"{sim_time:6.1f}  "
+                    f"{ti.get('tank_s', 0.0):6.3f}  "
+                    f"{ti.get('beta_t_prime', 1.0):6.3f}  "
+                    f"{ti.get('beta_n_prime', 1.0):6.3f}  "
+                    f"{ti.get('p_t', 0.0):8.3f}  "
+                    f"{ti.get('p_n', 0.0):8.3f}  "
+                    f"{ti.get('p_d', 0.0):8.3f}  "
+                    f"{ti.get('contact_state', '?')}"
+                )
+
             # Simulation step
             env.step()
 
-            # ── Custom visuals (trail + force arrow) ──────────────────
+            # ── Visuals ───────────────────────────────────────────────
             ee = env.ee_pos()
             _trail.append(ee.copy())
 
             viewer.user_scn.ngeom = 0
+            _max_g = viewer.user_scn.maxgeom
 
-            # Tool-sphere trajectory trail (green spheres, fading with age)
+            # Trail (green spheres)
             pts = list(_trail)[::_TRAIL_STRIDE]
             n_pts = len(pts)
             for i, p in enumerate(pts):
-                if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom - 2:
+                if viewer.user_scn.ngeom >= _max_g - 5:
                     break
-                age = i / max(n_pts - 1, 1)        # 0 = oldest, 1 = newest
-                alpha = float(age ** 1.5)
+                age = i / max(n_pts - 1, 1)
+                alpha_c = float(age ** 1.5)
                 g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
                 mujoco.mjv_initGeom(
                     g, mujoco.mjtGeom.mjGEOM_SPHERE,
                     np.array([_TRAIL_RADIUS, 0.0, 0.0]),
                     p, np.eye(3).flatten(),
-                    np.array([0.2, 1.0, 0.2, alpha], dtype=np.float32),
+                    np.array([0.2, 1.0, 0.2, alpha_c], dtype=np.float32),
                 )
                 viewer.user_scn.ngeom += 1
 
-            # Disturbance force arrow (orange, only while active)
-            if active and viewer.user_scn.ngeom < viewer.user_scn.maxgeom:
+            # Disturbance force arrow (orange)
+            if active and viewer.user_scn.ngeom < _max_g:
                 body_com = env.data.xpos[disturbance_body_id].copy()
                 tip = body_com + config.DISTURBANCE_FORCE * _FORCE_ARROW_SCALE
                 g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
@@ -187,18 +242,150 @@ def run():
                 g.rgba[:] = np.array([1.0, 0.35, 0.0, 0.9], dtype=np.float32)
                 viewer.user_scn.ngeom += 1
 
+            # Motion term arrow (blue) — tangential polishing direction
+            motion_vec = tank_info.get("motion_vec")
+            if motion_vec is not None and np.linalg.norm(motion_vec) > 1e-6:
+                if viewer.user_scn.ngeom < _max_g:
+                    tip = ee + _VEL_ARROW_SCALE * motion_vec
+                    g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+                    mujoco.mjv_connector(
+                        g, mujoco.mjtGeom.mjGEOM_ARROW,
+                        _ARROW_THICKNESS, ee, tip,
+                    )
+                    g.rgba[:] = np.array([0.1, 0.4, 1.0, 0.9], dtype=np.float32)
+                    viewer.user_scn.ngeom += 1
+
+            # Force term arrow (red) — inward normal force direction
+            force_vec = tank_info.get("force_vec")
+            if force_vec is not None and np.linalg.norm(force_vec) > 1e-6:
+                if viewer.user_scn.ngeom < _max_g:
+                    tip = ee + _VEL_ARROW_SCALE * force_vec
+                    g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+                    mujoco.mjv_connector(
+                        g, mujoco.mjtGeom.mjGEOM_ARROW,
+                        _ARROW_THICKNESS, ee, tip,
+                    )
+                    g.rgba[:] = np.array([1.0, 0.1, 0.1, 0.9], dtype=np.float32)
+                    viewer.user_scn.ngeom += 1
+
+            # Corrected v_d arrow (green) — tank-corrected commanded velocity
+            vd_vec = tank_info.get("vd_vec")
+            if vd_vec is not None and np.linalg.norm(vd_vec) > 1e-6:
+                if viewer.user_scn.ngeom < _max_g:
+                    tip = ee + _VEL_ARROW_SCALE * vd_vec
+                    g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+                    mujoco.mjv_connector(
+                        g, mujoco.mjtGeom.mjGEOM_ARROW,
+                        _ARROW_THICKNESS, ee, tip,
+                    )
+                    g.rgba[:] = np.array([0.1, 0.9, 0.1, 0.9], dtype=np.float32)
+                    viewer.user_scn.ngeom += 1
+
+            # ── Energy-tank level bar ─────────────────────────────────
+            # Dark-gray background shows max capacity; colored fill shows
+            # current energy (red=empty → yellow=half → green=full).
+            # A yellow band marks the alpha-shutoff region (s_max - delta).
+            # A white sphere caps the fill level for easy reading.
+            _tank_frac = np.clip(
+                tank_info.get("tank_s", ctrl.tank_s0) / ctrl.tank_s_max,
+                0.0, 1.0,
+            )
+
+            # Background (dark gray, full-height outline)
+            if viewer.user_scn.ngeom < _max_g:
+                g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+                _bg_hh = _TANK_BAR_MAX_H / 2
+                mujoco.mjv_initGeom(
+                    g, mujoco.mjtGeom.mjGEOM_BOX,
+                    np.array([_TANK_BAR_HALF_W * 1.5,
+                               _TANK_BAR_HALF_W * 1.5,
+                               _bg_hh]),
+                    _TANK_BAR_ORIGIN + np.array([0.0, 0.0, _bg_hh]),
+                    np.eye(3).flatten(),
+                    np.array([0.25, 0.25, 0.25, 0.75], dtype=np.float32),
+                )
+                viewer.user_scn.ngeom += 1
+
+            # Colored fill (grows upward from origin)
+            if viewer.user_scn.ngeom < _max_g:
+                _fill_hh = max(_tank_frac * _TANK_BAR_MAX_H / 2, 5e-4)
+                _tf = _tank_frac
+                _bar_r = 1.0 if _tf < 0.5 else 2.0 * (1.0 - _tf)
+                _bar_g = 2.0 * _tf if _tf < 0.5 else 1.0
+                g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+                mujoco.mjv_initGeom(
+                    g, mujoco.mjtGeom.mjGEOM_BOX,
+                    np.array([_TANK_BAR_HALF_W, _TANK_BAR_HALF_W, _fill_hh]),
+                    _TANK_BAR_ORIGIN + np.array([0.0, 0.0, _fill_hh]),
+                    np.eye(3).flatten(),
+                    np.array([_bar_r, _bar_g, 0.0, 0.95], dtype=np.float32),
+                )
+                viewer.user_scn.ngeom += 1
+
+            # Soft-limit band (yellow, at s_max - delta)
+            if ctrl.tank_delta > 0 and viewer.user_scn.ngeom < _max_g:
+                _soft_frac = (ctrl.tank_s_max - ctrl.tank_delta) / ctrl.tank_s_max
+                _band_z = (_TANK_BAR_ORIGIN[2]
+                           + _soft_frac * _TANK_BAR_MAX_H)
+                g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+                mujoco.mjv_initGeom(
+                    g, mujoco.mjtGeom.mjGEOM_BOX,
+                    np.array([_TANK_BAR_HALF_W * 2.2,
+                               _TANK_BAR_HALF_W * 2.2,
+                               0.0015]),
+                    np.array([_TANK_BAR_ORIGIN[0],
+                               _TANK_BAR_ORIGIN[1],
+                               _band_z]),
+                    np.eye(3).flatten(),
+                    np.array([1.0, 1.0, 0.0, 1.0], dtype=np.float32),
+                )
+                viewer.user_scn.ngeom += 1
+
+            # White cap sphere — floats at the current fill level
+            if viewer.user_scn.ngeom < _max_g:
+                _cap_z = (_TANK_BAR_ORIGIN[2]
+                          + _tank_frac * _TANK_BAR_MAX_H)
+                g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+                mujoco.mjv_initGeom(
+                    g, mujoco.mjtGeom.mjGEOM_SPHERE,
+                    np.array([_TANK_BAR_HALF_W * 1.8, 0.0, 0.0]),
+                    np.array([_TANK_BAR_ORIGIN[0],
+                               _TANK_BAR_ORIGIN[1],
+                               _cap_z]),
+                    np.eye(3).flatten(),
+                    np.array([1.0, 1.0, 1.0, 0.95], dtype=np.float32),
+                )
+                viewer.user_scn.ngeom += 1
+
             viewer.sync()
 
-            # Log  (ee computed above in the visual block)
+            # ── Log ───────────────────────────────────────────────────
             F_n = env.contact_normal_force()
             d = sphere.signed_dist(ee, config.TOOL_RADIUS)
 
-            log_t[step] = sim_time
-            log_pos[step] = ee
-            log_sigma[step] = sigma
-            log_force[step] = F_n
-            log_dist[step] = d
-            log_disturbance[step] = active
+            log_t[step]            = sim_time
+            log_pos[step]          = ee
+            log_sigma[step]        = sigma
+            log_force[step]        = F_n
+            log_dist[step]         = d
+            log_disturbance[step]  = active
+
+            log_tank_s[step]       = tank_info.get("tank_s", 0.0)
+            log_tank_alpha[step]   = tank_info.get("alpha", 1.0)
+            log_beta_t[step]       = tank_info.get("beta_t", 1.0)
+            log_beta_n[step]       = tank_info.get("beta_n", 1.0)
+            log_beta_t_prime[step] = tank_info.get("beta_t_prime", 1.0)
+            log_beta_n_prime[step] = tank_info.get("beta_n_prime", 1.0)
+            log_p_t[step]          = tank_info.get("p_t", 0.0)
+            log_p_n[step]          = tank_info.get("p_n", 0.0)
+            log_p_d[step]          = tank_info.get("p_d", 0.0)
+            log_motion_norm[step]  = tank_info.get("motion_norm", 0.0)
+            log_force_norm[step]   = tank_info.get("force_norm", 0.0)
+            log_vd_norm[step]      = tank_info.get("vd_norm", 0.0)
+            log_F_des[step]        = tank_info.get("F_des_normal", 0.0)
+            log_contact_num[step]  = _contact_to_num.get(
+                tank_info.get("contact_state", "far"), 0
+            )
 
             # Real-time pacing
             elapsed = time.time() - step_wall
@@ -213,16 +400,48 @@ def run():
     print(f"\nDone: {steps_done} steps in {wall_time:.1f} s wall-time.")
 
     # ── Post-simulation plots ─────────────────────────────────────────
-    t = log_t[:steps_done]
-    pos = log_pos[:steps_done]
-    sigma_log = log_sigma[:steps_done]
-    force_log = log_force[:steps_done]
-    dist_log = log_dist[:steps_done]
-    disturbance_log = log_disturbance[:steps_done]
+    t        = log_t[:steps_done]
+    pos      = log_pos[:steps_done]
+    sigma_log    = log_sigma[:steps_done]
+    force_log    = log_force[:steps_done]
+    dist_log     = log_dist[:steps_done]
+    dist_log_arr = log_disturbance[:steps_done]
+
+    tank_logs = {
+        "tank_s":       log_tank_s[:steps_done],
+        "alpha":        log_tank_alpha[:steps_done],
+        "beta_t":       log_beta_t[:steps_done],
+        "beta_n":       log_beta_n[:steps_done],
+        "beta_t_prime": log_beta_t_prime[:steps_done],
+        "beta_n_prime": log_beta_n_prime[:steps_done],
+        "p_t":          log_p_t[:steps_done],
+        "p_n":          log_p_n[:steps_done],
+        "p_d":          log_p_d[:steps_done],
+        "motion_norm":  log_motion_norm[:steps_done],
+        "force_norm":   log_force_norm[:steps_done],
+        "vd_norm":      log_vd_norm[:steps_done],
+        "F_des":        log_F_des[:steps_done],
+        "contact_num":  log_contact_num[:steps_done],
+    }
 
     _plot_results(t, pos, sigma_log, force_log, dist_log,
                   config.SPHERE_CENTER, config.SPHERE_RADIUS,
-                  config.FORCE_DESIRED, disturbance_log)
+                  config.FORCE_DESIRED, dist_log_arr)
+
+    _plot_tank_results(t, force_log, tank_logs,
+                       config.FORCE_DESIRED,
+                       ctrl.tank_s_max,
+                       dist_log_arr)
+
+
+# ──────────────────────────────────────────────────────────────────────
+def _shade_disturbance(ax, t, disturbance):
+    """Shade disturbance window on ax if any disturbance was active."""
+    if disturbance is None or not disturbance.any():
+        return
+    idx = np.where(disturbance)[0]
+    d_t0, d_t1 = t[idx[0]], t[idx[-1]]
+    ax.axvspan(d_t0, d_t1, color="orange", alpha=0.15, label="disturbance")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -230,16 +449,8 @@ def _plot_results(t, pos, sigma, force, dist, c, R, F_d, disturbance=None):
     fig = plt.figure(figsize=(15, 10))
     fig.suptitle("DS-Based Surface Polishing Demo", fontsize=14, fontweight="bold")
 
-    # Disturbance window bounds for shading (derived from log, not config,
-    # so it reflects what actually ran even if the window was cut short)
-    d_t0 = d_t1 = None
-    if disturbance is not None and disturbance.any():
-        idx = np.where(disturbance)[0]
-        d_t0, d_t1 = t[idx[0]], t[idx[-1]]
-
     def _shade(ax):
-        if d_t0 is not None:
-            ax.axvspan(d_t0, d_t1, color="orange", alpha=0.15, label="disturbance")
+        _shade_disturbance(ax, t, disturbance)
 
     # 1. 3-D trajectory on sphere
     ax3d = fig.add_subplot(2, 3, 1, projection="3d")
@@ -269,10 +480,10 @@ def _plot_results(t, pos, sigma, force, dist, c, R, F_d, disturbance=None):
 
     # 4. Normal contact force
     ax4 = fig.add_subplot(2, 3, 4)
-    lp_window = max(1, int(0.01 / (t[1] - t[0]))) if len(t) > 1 else 1  # 10 ms
+    lp_window = max(1, int(0.01 / (t[1] - t[0]))) if len(t) > 1 else 1
     force_filt = uniform_filter1d(force, size=lp_window)
     ax4.plot(t, force, lw=0.4, alpha=0.3, color="tab:blue", label="Raw $F_n$")
-    ax4.plot(t, force_filt, lw=1.2, color="tab:blue", label="Filtered $F_n$ (LP 5 Hz)")
+    ax4.plot(t, force_filt, lw=1.2, color="tab:blue", label="Filtered $F_n$")
     ax4.axhline(F_d, color="r", ls="--", lw=1.2, label=f"F_d = {F_d} N")
     _shade(ax4); ax4.legend()
     ax4.set_xlabel("time [s]"); ax4.set_ylabel("Force [N]")
@@ -282,11 +493,11 @@ def _plot_results(t, pos, sigma, force, dist, c, R, F_d, disturbance=None):
     ax5 = fig.add_subplot(2, 3, 5)
     ax5.plot(t, sigma, lw=0.8, color="tab:orange")
     ax5.set_ylim(-0.05, 1.05)
-    _shade(ax5); ax5.legend()
+    _shade(ax5)
     ax5.set_xlabel("time [s]"); ax5.set_ylabel("σ")
     ax5.set_title("Contact Blend Weight (0=reach, 1=polish)")
 
-    # 6. EE height over time
+    # 6. EE world position
     ax6 = fig.add_subplot(2, 3, 6)
     ax6.plot(t, pos[:, 0], lw=0.8, label="x")
     ax6.plot(t, pos[:, 1], lw=0.8, label="y")
@@ -302,10 +513,105 @@ def _plot_results(t, pos, sigma, force, dist, c, R, F_d, disturbance=None):
     plt.show()
 
 
+# ──────────────────────────────────────────────────────────────────────
+def _plot_tank_results(t, force_log, tl, F_d, tank_s_max, disturbance=None):
+    """Six-panel tank results figure."""
+    lp_window = max(1, int(0.01 / (t[1] - t[0]))) if len(t) > 1 else 1
+
+    fig, axes = plt.subplots(3, 2, figsize=(14, 12))
+    fig.suptitle("Energy Tank Analysis", fontsize=14, fontweight="bold")
+    axes = axes.flatten()
+
+    def _shade(ax):
+        _shade_disturbance(ax, t, disturbance)
+
+    # A. Tank energy
+    ax = axes[0]
+    ax.plot(t, tl["tank_s"], lw=1.0, color="tab:purple", label="$s$ (tank energy)")
+    ax.axhline(0,          color="k",   ls="--", lw=0.8)
+    ax.axhline(tank_s_max, color="tab:red", ls="--", lw=0.8, label="$s_{\\max}$")
+    ax.fill_between(t, tl["tank_s"], 0, alpha=0.15, color="tab:purple")
+    _shade(ax)
+    ax.legend(fontsize=8)
+    ax.set_xlabel("time [s]"); ax.set_ylabel("energy [J]")
+    ax.set_title("A. Tank Energy")
+    ax.set_ylim(bottom=-0.1)
+
+    # B. Beta scaling
+    ax = axes[1]
+    ax.plot(t, tl["beta_t_prime"], lw=1.2, color="tab:blue",   label="$\\beta_t'$ (motion)")
+    ax.plot(t, tl["beta_n_prime"], lw=1.2, color="tab:red",    label="$\\beta_n'$ (force)")
+    ax.plot(t, tl["beta_t"],       lw=0.7, color="tab:blue",   ls="--", label="$\\beta_t$")
+    ax.plot(t, tl["beta_n"],       lw=0.7, color="tab:red",    ls="--", label="$\\beta_n$")
+    _shade(ax)
+    ax.set_ylim(-0.05, 1.15)
+    ax.legend(fontsize=8)
+    ax.set_xlabel("time [s]"); ax.set_ylabel("scaling")
+    ax.set_title("B. Beta Scaling (1=active, 0=blocked)")
+
+    # C. Power terms
+    ax = axes[2]
+    ax.plot(t, tl["p_t"], lw=0.8, color="tab:blue",   label="$p_t$ (motion power)")
+    ax.plot(t, tl["p_n"], lw=0.8, color="tab:red",    label="$p_n$ (force power)")
+    ax.plot(t, tl["p_d"], lw=0.8, color="tab:green",  label="$p_d$ (dissipation)")
+    ax.axhline(0, color="k", lw=0.5)
+    _shade(ax)
+    ax.legend(fontsize=8)
+    ax.set_xlabel("time [s]"); ax.set_ylabel("power [W]")
+    ax.set_title("C. Power Terms")
+
+    # D. Force tracking
+    ax = axes[3]
+    force_filt = uniform_filter1d(force_log, size=lp_window)
+    ax.plot(t, force_log,    lw=0.4, alpha=0.3, color="tab:blue", label="$F_n$ raw")
+    ax.plot(t, force_filt,   lw=1.2, color="tab:blue",            label="$F_n$ filtered")
+    ax.plot(t, tl["F_des"],  lw=1.2, color="tab:orange",          label="$F_{des}$ ramped")
+    ax.axhline(F_d,          color="r", ls="--", lw=1.2,          label=f"$F_d$ = {F_d} N")
+    _shade(ax)
+    ax.legend(fontsize=8)
+    ax.set_xlabel("time [s]"); ax.set_ylabel("Force [N]")
+    ax.set_title("D. Force Tracking")
+
+    # E. Velocity component norms
+    ax = axes[4]
+    ax.plot(t, tl["motion_norm"], lw=1.0, color="tab:blue",   label="$||$motion$||$")
+    ax.plot(t, tl["force_norm"],  lw=1.0, color="tab:red",    label="$||$force$||$")
+    ax.plot(t, tl["vd_norm"],     lw=1.0, color="tab:green",  label="$||v_d||$")
+    _shade(ax)
+    ax.legend(fontsize=8)
+    ax.set_xlabel("time [s]"); ax.set_ylabel("speed [m/s]")
+    ax.set_title("E. Velocity Component Norms")
+
+    # F. Contact state / sigma blend
+    ax = axes[5]
+    ax_r = ax.twinx()
+    ax.plot(t, tl["contact_num"], lw=1.0, color="tab:orange",
+            label="contact state (0=far,1=pre,2=cont)")
+    ax_r.plot(t, np.clip(tl["alpha"], 0, 1), lw=0.8, color="tab:purple",
+              ls="--", label="alpha(s)")
+    ax.set_yticks([0, 1, 2])
+    ax.set_yticklabels(["far", "preload", "contact"])
+    ax.set_ylim(-0.3, 2.5)
+    ax_r.set_ylim(-0.05, 1.15)
+    ax_r.set_ylabel("alpha")
+    _shade(ax)
+    ax.legend(loc="upper left", fontsize=8)
+    ax_r.legend(loc="upper right", fontsize=8)
+    ax.set_xlabel("time [s]")
+    ax.set_title("F. Contact State & Alpha")
+
+    plt.tight_layout()
+    out_path = os.path.join(os.path.dirname(__file__), "tank_results.png")
+    plt.savefig(out_path, dpi=150)
+    print(f"Tank plots saved to {out_path}")
+    plt.show()
+
+
+# ──────────────────────────────────────────────────────────────────────
 def _draw_sphere(ax, c, R, alpha=0.15):
     """Draw a transparent sphere mesh in a 3D axes."""
     u = np.linspace(0, 2 * np.pi, 40)
-    v = np.linspace(0, 3 * np.pi / 4, 20)   # 3/8 sphere (0..135 deg from top)
+    v = np.linspace(0, 3 * np.pi / 4, 20)
     x = c[0] + R * np.outer(np.cos(u), np.sin(v))
     y = c[1] + R * np.outer(np.sin(u), np.sin(v))
     z = c[2] + R * np.outer(np.ones_like(u), np.cos(v))

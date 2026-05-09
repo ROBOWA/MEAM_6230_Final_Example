@@ -14,7 +14,7 @@ import config
 from sphere_surface import SphereSurface
 from ds import PolishingDS
 from sim_env import SimEnv
-from controller import PolishingController
+from controller_tank import PolishingControllerTank
 
 # ── Run simulation ────────────────────────────────────────────────────────────
 print("Running simulation (headless)...")
@@ -23,12 +23,18 @@ env = SimEnv(config.SCENE_XML)
 ds  = PolishingDS(sphere, r_tool=config.TOOL_RADIUS, v_target=config.DS_V_TARGET,
                   omega=config.DS_OMEGA, r_circle=config.DS_R_CIRCLE,
                   k_limit=config.DS_K_LIMIT, d_blend=config.DS_D_BLEND)
-ctrl = PolishingController(env, sphere, ds, q_ref=config.Q_INIT,
-                           F_d=config.FORCE_DESIRED, d_n=config.CTRL_D_N,
-                           d_t=config.CTRL_D_T, k_null=config.CTRL_K_NULL,
-                           b_null=config.CTRL_B_NULL, dls_lambda=config.CTRL_DLS_LAMBDA,
-                           force_ramp_time=config.CTRL_FORCE_RAMP_TIME,
-                           k_force_fb=getattr(config, "CTRL_K_FORCE_FB", 0.0))
+ctrl = PolishingControllerTank(env, sphere, ds, q_ref=config.Q_INIT,
+                               F_d=config.FORCE_DESIRED, d_n=config.CTRL_D_N,
+                               d_t=config.CTRL_D_T, k_null=config.CTRL_K_NULL,
+                               b_null=config.CTRL_B_NULL, dls_lambda=config.CTRL_DLS_LAMBDA,
+                               d_side=getattr(config, "CTRL_D_SIDE", config.CTRL_D_N),
+                               v_max=getattr(config, "CTRL_V_MAX", 0.15),
+                               force_ramp_time=config.CTRL_FORCE_RAMP_TIME,
+                               k_force_fb=getattr(config, "CTRL_K_FORCE_FB", 0.0),
+                               use_energy_tank=getattr(config, "CTRL_USE_ENERGY_TANK", True),
+                               tank_s0=getattr(config, "CTRL_TANK_S0", 1.0),
+                               tank_s_max=getattr(config, "CTRL_TANK_S_MAX", 5.0),
+                               tank_delta=getattr(config, "CTRL_TANK_DELTA", 0.5))
 env.reset(config.Q_INIT); ctrl.reset()
 env.model.opt.timestep = 0.001  # 1 ms control timestep → 1000 Hz control loop
 ctrl.dt = env.model.opt.timestep
@@ -43,9 +49,22 @@ log_fn      = np.zeros(N)
 log_dist    = np.zeros(N)
 log_vd_tan  = np.zeros(N)
 log_vee_tan = np.zeros(N)
-log_vd_n    = np.zeros(N)
-log_vee_n   = np.zeros(N)
-log_disturbance = np.zeros(N, dtype=bool)
+log_vd_n         = np.zeros(N)
+log_vee_n        = np.zeros(N)
+log_disturbance  = np.zeros(N, dtype=bool)
+# Tank
+log_tank_s       = np.zeros(N)
+log_beta_t_prime = np.zeros(N)
+log_beta_n_prime = np.zeros(N)
+log_beta_t       = np.zeros(N)
+log_beta_n       = np.zeros(N)
+log_p_t          = np.zeros(N)
+log_p_n          = np.zeros(N)
+log_p_d          = np.zeros(N)
+log_F_des        = np.zeros(N)
+log_motion_norm  = np.zeros(N)
+log_force_norm   = np.zeros(N)
+log_vd_norm      = np.zeros(N)
 
 disturbance_body_id = mujoco.mj_name2id(
     env.model, mujoco.mjtObj.mjOBJ_BODY, config.DISTURBANCE_BODY_NAME
@@ -53,7 +72,7 @@ disturbance_body_id = mujoco.mj_name2id(
 
 for k in range(N):
     sim_time = k * dt
-    v_d, n, sigma, _, _, _ = ctrl.step()
+    v_d, n, sigma, _, _, _, tank_info = ctrl.step()
 
     # Disturbance — applied before mj_step
     active = (
@@ -84,8 +103,21 @@ for k in range(N):
     log_vd_n[k]    = np.dot(v_d, n)
     log_vee_n[k]   = np.dot(v_ee, n)
 
+    log_tank_s[k]       = tank_info.get("tank_s", ctrl.tank_s0)
+    log_beta_t_prime[k] = tank_info.get("beta_t_prime", 1.0)
+    log_beta_n_prime[k] = tank_info.get("beta_n_prime", 1.0)
+    log_beta_t[k]       = tank_info.get("beta_t", 1.0)
+    log_beta_n[k]       = tank_info.get("beta_n", 1.0)
+    log_p_t[k]          = tank_info.get("p_t", 0.0)
+    log_p_n[k]          = tank_info.get("p_n", 0.0)
+    log_p_d[k]          = tank_info.get("p_d", 0.0)
+    log_F_des[k]        = tank_info.get("F_des_normal", 0.0)
+    log_motion_norm[k]  = tank_info.get("motion_norm", 0.0)
+    log_force_norm[k]   = tank_info.get("force_norm", 0.0)
+    log_vd_norm[k]      = tank_info.get("vd_norm", 0.0)
+
     if k % 5000 == 0:
-        print(f"  {k*dt:.1f}s / {SIM_T:.0f}s")
+        print(f"  {k*dt:.1f}s / {SIM_T:.0f}s  |  tank_s={log_tank_s[k]:.3f} J")
 
 print("Done. Generating figures...")
 
@@ -326,3 +358,77 @@ fig.tight_layout()
 fig.savefig(f"{OUT}/fig_ds_surface_convergence_xz.pdf", bbox_inches="tight", dpi=200)
 fig.savefig(f"{OUT}/fig_ds_surface_convergence_xz.png", bbox_inches="tight", dpi=200)
 plt.close()
+
+# ─── Figure 6: Energy Tank ────────────────────────────────────────────────────
+# Four-panel figure showing tank energy, beta scalings, power terms, and
+# force tracking over the full simulation.  Disturbance window is shaded.
+LP10 = 10  # 10-step LP ≈ 100 Hz at 1 kHz
+fn_filt = uniform_filter1d(log_fn, size=LP10)
+
+fig, axes = plt.subplots(4, 1, figsize=(9, 11), sharex=True)
+fig.suptitle("Energy Tank Analysis", fontsize=13, fontweight="bold")
+
+# Panel A — tank energy
+ax = axes[0]
+ax.fill_between(log_t, log_tank_s, alpha=0.18, color="tab:purple")
+ax.plot(log_t, log_tank_s, lw=1.0, color="tab:purple", label="$s(t)$ — tank energy")
+ax.axhline(ctrl.tank_s_max, color="tab:red",  ls="--", lw=1.0,
+           label=f"$s_{{max}}$ = {ctrl.tank_s_max:.1f} J")
+ax.axhline(ctrl.tank_s0,    color="tab:gray", ls=":",  lw=0.8,
+           label=f"$s_0$ = {ctrl.tank_s0:.1f} J")
+if ctrl.tank_delta > 0:
+    soft = ctrl.tank_s_max - ctrl.tank_delta
+    ax.axhline(soft, color="gold", ls="-.", lw=0.9,
+               label=f"$s_{{max}} - \\delta$ = {soft:.1f} J (alpha shutoff)")
+ax.set_ylim(bottom=0)
+ax.set_ylabel("Energy [J]")
+ax.set_title("A.  Tank Energy $s(t)$")
+_shade(ax); ax.legend(fontsize=8, ncol=2); ax.grid(True, alpha=0.3)
+
+# Panel B — beta scalings
+ax = axes[1]
+ax.plot(log_t, log_beta_t_prime, lw=1.1, color="tab:blue",
+        label=r"$\beta_t'$ (motion, active gating)")
+ax.plot(log_t, log_beta_n_prime, lw=1.1, color="tab:red",
+        label=r"$\beta_n'$ (force, active gating)")
+ax.plot(log_t, log_beta_t, lw=0.6, color="tab:blue",  ls="--",
+        label=r"$\beta_t$ (tank update)")
+ax.plot(log_t, log_beta_n, lw=0.6, color="tab:red",   ls="--",
+        label=r"$\beta_n$ (tank update)")
+ax.set_ylim(-0.05, 1.15)
+ax.set_yticks([0, 0.5, 1])
+ax.set_ylabel("Scaling")
+ax.set_title(r"B.  Beta Scalings  (1 = fully active, 0 = blocked by empty tank)")
+_shade(ax); ax.legend(fontsize=8, ncol=2); ax.grid(True, alpha=0.3)
+
+# Panel C — power terms
+ax = axes[2]
+ax.plot(log_t, log_p_t, lw=0.7, color="tab:blue",
+        label=r"$p_t = \dot{x}^T D\,f_t$  (tangential active)")
+ax.plot(log_t, log_p_n, lw=0.7, color="tab:red",
+        label=r"$p_n = \dot{x}^T D\,f_n$  (normal force)")
+ax.plot(log_t, log_p_d, lw=0.9, color="tab:green",
+        label=r"$p_d = \dot{x}^T D\,\dot{x}$  (dissipation, charges tank)")
+ax.axhline(0, color="k", lw=0.5)
+ax.set_ylabel("Power [W]")
+ax.set_title(r"C.  Power Terms  ($p_d$ charges tank; $p_t, p_n > 0$ drain it)")
+_shade(ax); ax.legend(fontsize=8, ncol=3); ax.grid(True, alpha=0.3)
+
+# Panel D — force tracking
+ax = axes[3]
+ax.plot(log_t, log_fn,      lw=0.35, alpha=0.25, color="tab:blue", label="$F_n$ raw")
+ax.plot(log_t, fn_filt,     lw=1.1,              color="tab:blue", label="$F_n$ filtered")
+ax.plot(log_t, log_F_des,   lw=1.1,              color="tab:orange",
+        label="$F_{des}$ (ramped command)")
+ax.axhline(config.FORCE_DESIRED, color="r", ls="--", lw=1.0,
+           label=f"$F_d$ = {config.FORCE_DESIRED:.0f} N")
+ax.set_ylabel("Force [N]")
+ax.set_xlabel("Time [s]")
+ax.set_title("D.  Contact Force Tracking")
+_shade(ax); ax.legend(fontsize=8, ncol=2); ax.grid(True, alpha=0.3)
+
+fig.tight_layout()
+fig.savefig(f"{OUT}/fig_energy_tank.pdf", bbox_inches="tight", dpi=200)
+fig.savefig(f"{OUT}/fig_energy_tank.png", bbox_inches="tight", dpi=200)
+plt.close()
+print("Energy tank figure saved.")
