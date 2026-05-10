@@ -23,22 +23,14 @@
     <light pos="1 -1 1.5" dir="-0.5 0.5 -1" directional="true" diffuse="0.4 0.4 0.4"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
 
-    <!-- Pedestal: covers the lower hemisphere visually (R=0.3 sphere, center z=0.3) -->
-    <body name="pedestal" pos="0.5 0 0.15">
-      <geom type="cylinder" size="0.28 0.15" material="pedestal_mat"
+    <body name="pedestal" pos="0.5 0 0.125">
+      <geom type="cylinder" size="0.055 0.125" material="pedestal_mat"
             contype="0" conaffinity="0"/>
     </body>
 
-    <!-- 3/8 sphere polishing surface: center=(0.5,0,0.3), R=0.3 m -->
-    <!-- contype=3 (bits 1+2): collides with robot links (bit1) AND tool_sphere (bit2)
-         This prevents any arm link from visually passing through the sphere. -->
+    <!-- 3/8 sphere polishing surface: center=(0.5,0,0.3), R=0.15 m -->
     <body name="sphere_body" pos="0.5 0 0.3">
-      <!-- margin=0.002: contact activates 2mm before surface → no force dropout.
-           solimp dmin=0.8: stiff in margin zone → immediate resistance, no bounce.
-           solref tc=0.100: soft enough to reduce b_contact (≈26 N/(m/s)), limiting
-           the extra normal force injected by tangential orbit speed.  Dampratio=1.5
-           keeps the contact overdamped (no bounce). -->
-      <geom name="polishing_sphere" type="sphere" size="0.3"
+      <geom name="polishing_sphere" type="sphere" size="0.15"
             material="sphere_mat"
             contype="3" conaffinity="3"
             solref="0.050 1.5" solimp="0.9 0.99 0.001"

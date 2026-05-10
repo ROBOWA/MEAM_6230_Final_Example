@@ -35,7 +35,7 @@ def probe(d_t, k_limit, d_n=config.CTRL_D_N, duration=40.0):
 
     for _ in range(int(duration / 0.001)):
         ee = env.ee_pos()
-        v_d, n, sigma, _, _, _ = ctrl.step()
+        v_d, n, sigma, _, _, _, _ = ctrl.step()
         env.step()
 
         if sigma < 0.45:

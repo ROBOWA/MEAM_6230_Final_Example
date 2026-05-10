@@ -87,6 +87,8 @@
     <mesh file="link7_5.obj"/>
     <mesh file="link7_6.obj"/>
     <mesh file="link7_7.obj"/>
+    <mesh name="ft_sensor_mesh" file="ft_sensor.stl"/>
+    <mesh name="sphere_tool_mesh" file="sphere_tool.stl"/>
   </asset>
 
   <worldbody>
@@ -181,11 +183,33 @@
                     <geom mesh="link7_6" material="dark_grey" class="panda/visual"/>
                     <geom mesh="link7_7" material="white" class="panda/visual"/>
                     <geom mesh="link7_c" class="panda/collision"/>
-                    <!-- Polishing tool: small sphere tip, only collides with the surface sphere -->
-                    <body name="attachment" pos="0 0 0.107" quat="0.3826834 0 0 0.9238795">
-                      <site name="attachment_site" pos="0 0 0.06" size="0.012" rgba="1 0 0 1" group="0"/>
-                      <geom name="tool_sphere" type="sphere" size="0.009" pos="0 0 0.06"
-                            contype="2" conaffinity="2" rgba="0.9 0.2 0.2 1" group="0" friction="0.8 0.005 0.0001"/>
+                    <body name="ft_sensor" pos="0 0 0.142" quat="1 0 0 0">
+                      <inertial mass="0.0" pos="0 0 -0.019" diaginertia="1e-4 1e-4 1e-4"/>
+                      <geom type="mesh"
+                            mesh="ft_sensor_mesh"
+                            contype="0" conaffinity="0"
+                            rgba="0.1 0.1 0.1 0.9"/>
+                      <geom name="ft_sensor_collision"
+                            type="cylinder"
+                            pos="0 0 -0.0205"
+                            size="0.0375 0.0145"
+                            contype="0" conaffinity="0"
+                            rgba="0 0 0 0"/>
+                      <body name="ft_frame" pos="0 0 0" quat="1 0 0 0">
+                        <site name="ft_site" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
+                        <body name="sphere_tool" pos="0 0 0" quat="1 0 0 0">
+                          <inertial mass="0.0" pos="0 0 -0.019" diaginertia="1e-4 1e-4 1e-4"/>
+                          <geom type="mesh"
+                                mesh="sphere_tool_mesh"
+                                contype="0" conaffinity="0"
+                                rgba="0.7 0.7 0.7 1"/>
+                          <body name="attachment" pos="0 0 0.107" quat="0.3826834 0 0 0.9238795">
+                            <site name="attachment_site" pos="0 0 0.03" size="0.012" rgba="1 0 0 1" group="0"/>
+                            <geom name="tool_sphere" type="sphere" size="0.009" pos="0 0 0.03"
+                                  contype="2" conaffinity="2" rgba="0.9 0.2 0.2 1" group="0" friction="0.8 0.005 0.0001"/>
+                          </body>
+                        </body>
+                      </body>
                     </body>
                   </body>
                 </body>
@@ -196,6 +220,11 @@
       </body>
     </body>
   </worldbody>
+
+  <sensor>
+    <force name="wrist_force" site="ft_site"/>
+    <torque name="wrist_torque" site="ft_site"/>
+  </sensor>
 
   <!-- Motor actuators: ctrl = torque [N·m], passivity preserved by Python controller -->
   <actuator>

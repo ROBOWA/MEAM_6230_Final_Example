@@ -42,7 +42,7 @@ def probe(d_n=None, d_t=None, F_d=None, duration=15.0, force_ramp_time=None):
 
     for _ in range(n_steps):
         ee = env.ee_pos()
-        v_d, n, sigma, state, F_filt, F_meas = ctrl.step()
+        v_d, n, sigma, state, F_filt, F_meas, _ = ctrl.step()
         env.step()
         fn = env.raw_contact_normal_force()
         d  = sphere.signed_dist(ee, config.TOOL_RADIUS)

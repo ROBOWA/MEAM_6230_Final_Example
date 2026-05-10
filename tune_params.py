@@ -80,7 +80,7 @@ def run_once(k_force_fb, use_force_feedback, F_d, duration=DURATION):
 
     for _ in range(int(duration / DT_SIM)):
         ee = env.ee_pos()
-        v_d, n, sigma, _, _, _ = ctrl.step()
+        v_d, n, sigma, _, _, _, _ = ctrl.step()
         env.step()
 
         if sigma < 0.45:
