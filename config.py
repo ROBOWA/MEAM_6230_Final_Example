@@ -31,6 +31,11 @@ CTRL_FORCE_RAMP_TIME = 2.0   # time [s] to linearly ramp from F_preload to F_des
 CTRL_K_FORCE_FB = 0.0  # force-feedback gain [m/(s·N)]: v_d_n += k*(F_d - F_meas)
                           # compensates d_t coupling artefact; F_err < 1.1 N at d_t=3000
 
+# ── Energy tank ───────────────────────────────────────────────────────
+CTRL_USE_ENERGY_TANK = True   # enable passive energy tank
+CTRL_TANK_S_MAX      = 60.0   # maximum tank capacity [J]
+CTRL_TANK_INIT       = "full" # initial tank level ("full", "empty", "half", or float)
+
 # Initial joint configuration – arm positioned above sphere top
 # Places EE at approximately (0.5, 0, 0.55)
 Q_INIT = np.array([0.0, -0.4, 0.0, -1.9, 0.0, 1, 0.785])

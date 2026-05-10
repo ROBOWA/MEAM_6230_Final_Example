@@ -124,6 +124,8 @@ class PolishingController:
             s0 = float(tank_init)
         self.tank_s = s0
         self._tank_s_init = s0
+        self.tank_s0 = s0           # alias used by visualization code
+        self.tank_delta = self.tank_delta_s   # alias used by visualization code
         self.last_tank_info = {}
 
     # ------------------------------------------------------------------
@@ -249,24 +251,53 @@ class PolishingController:
             ds_tank = self.dt * (alpha * pd - beta_r * pr - beta_n * pn)
             self.tank_s = float(np.clip(self.tank_s + ds_tank, 0.0, self.tank_s_max))
 
+            _motion_vec = (beta_r_prime * f_r).copy()
+            _force_vec  = (beta_n_prime * f_n).copy()
             self.last_tank_info = {
-                "tank_s":       self.tank_s,
-                "pr":           pr,
-                "pn":           pn,
-                "pd":           pd,
-                "alpha":        alpha,
-                "beta_r":       beta_r,
-                "beta_n":       beta_n,
-                "beta_r_prime": beta_r_prime,
-                "beta_n_prime": beta_n_prime,
+                # paper-style keys (kept for backward compat)
+                "pr":           pr,  "pn":  pn,  "pd":  pd,
+                "beta_r":       beta_r,   "beta_r_prime": beta_r_prime,
                 "ds_tank":      ds_tank,
+                # standard keys matching 6230_tangent convention
+                "tank_s":       self.tank_s,
+                "tank_s_max":   self.tank_s_max,
+                "tank_s_dot":   ds_tank / max(self.dt, 1e-9),
+                "alpha":        alpha,
+                "beta_t":       beta_r,   "beta_t_prime": beta_r_prime,
+                "beta_n":       beta_n,   "beta_n_prime": beta_n_prime,
+                "p_t":          pr,  "p_n": pn,  "p_d": pd,
+                "motion_vec":   _motion_vec,
+                "force_vec":    _force_vec,
+                "vd_vec":       v_d.copy(),
+                "motion_norm":  float(np.linalg.norm(_motion_vec)),
+                "force_norm":   float(np.linalg.norm(_force_vec)),
+                "vd_norm":      float(np.linalg.norm(v_d)),
+                "F_des_normal": F_des_normal,
+                "contact_state": contact_state,
+                "normal_force": normal_force,
             }
 
         else:
             # Tank disabled: pass all components through unmodified.
             v_d = f_c + f_r + f_n
             D, _ = self._construct_passive_ds_damping(v_d, n, force_active)
-            self.last_tank_info = {}
+            self.last_tank_info = {
+                "tank_s":       self.tank_s,
+                "tank_s_max":   self.tank_s_max,
+                "alpha":        1.0,
+                "beta_t":       1.0,  "beta_n":       1.0,
+                "beta_t_prime": 1.0,  "beta_n_prime": 1.0,
+                "p_t":          0.0,  "p_n": 0.0,  "p_d": 0.0,
+                "motion_vec":   f_r.copy(),
+                "force_vec":    f_n.copy(),
+                "vd_vec":       v_d.copy(),
+                "motion_norm":  float(np.linalg.norm(f_r)),
+                "force_norm":   float(np.linalg.norm(f_n)),
+                "vd_norm":      float(np.linalg.norm(v_d)),
+                "F_des_normal": F_des_normal,
+                "contact_state": contact_state,
+                "normal_force": normal_force,
+            }
 
         # ── 12. Cartesian impedance force ──────────────────────────────
         F_cart = D @ (v_d - v_ee)

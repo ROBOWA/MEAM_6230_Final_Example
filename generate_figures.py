@@ -28,7 +28,10 @@ ctrl = PolishingController(env, sphere, ds, q_ref=config.Q_INIT,
                            d_t=config.CTRL_D_T, k_null=config.CTRL_K_NULL,
                            b_null=config.CTRL_B_NULL, dls_lambda=config.CTRL_DLS_LAMBDA,
                            force_ramp_time=config.CTRL_FORCE_RAMP_TIME,
-                           k_force_fb=getattr(config, "CTRL_K_FORCE_FB", 0.0))
+                           k_force_fb=getattr(config, "CTRL_K_FORCE_FB", 0.0),
+                           use_energy_tank=getattr(config, "CTRL_USE_ENERGY_TANK", True),
+                           tank_s_max=getattr(config, "CTRL_TANK_S_MAX", 60.0),
+                           tank_init=getattr(config, "CTRL_TANK_INIT", "full"))
 env.reset(config.Q_INIT); ctrl.reset()
 env.model.opt.timestep = 0.001  # 1 ms control timestep → 1000 Hz control loop
 ctrl.dt = env.model.opt.timestep
@@ -46,14 +49,19 @@ log_vee_tan = np.zeros(N)
 log_vd_n    = np.zeros(N)
 log_vee_n   = np.zeros(N)
 log_disturbance = np.zeros(N, dtype=bool)
-log_tank_s  = np.zeros(N)
-log_pd      = np.zeros(N)
-log_pr      = np.zeros(N)
-log_pn      = np.zeros(N)
-log_net     = np.zeros(N)
-log_beta_r  = np.zeros(N)
-log_beta_n  = np.zeros(N)
-log_alpha   = np.zeros(N)
+log_tank_s       = np.zeros(N)
+log_beta_t_prime = np.zeros(N)
+log_beta_n_prime = np.zeros(N)
+log_beta_t       = np.zeros(N)
+log_beta_n       = np.zeros(N)
+log_p_t          = np.zeros(N)
+log_p_n          = np.zeros(N)
+log_p_d          = np.zeros(N)
+log_F_des        = np.zeros(N)
+log_motion_norm  = np.zeros(N)
+log_force_norm   = np.zeros(N)
+log_vd_norm      = np.zeros(N)
+log_alpha        = np.zeros(N)
 
 disturbance_body_id = mujoco.mj_name2id(
     env.model, mujoco.mjtObj.mjOBJ_BODY, config.DISTURBANCE_BODY_NAME
@@ -93,16 +101,19 @@ for k in range(N):
     log_vee_n[k]   = np.dot(v_ee, n)
 
     ti = ctrl.last_tank_info
-    if ti:
-        log_tank_s[k] = ti.get("tank_s", 0.0)
-        log_pd[k]     = ti.get("pd", 0.0)
-        log_pr[k]     = ti.get("beta_r", 1.0) * ti.get("pr", 0.0)
-        log_pn[k]     = ti.get("beta_n", 1.0) * ti.get("pn", 0.0)
-        ds_tank       = ti.get("ds_tank", 0.0)
-        log_net[k]    = ds_tank / max(dt, 1e-9)
-        log_beta_r[k] = ti.get("beta_r_prime", 1.0)
-        log_beta_n[k] = ti.get("beta_n_prime", 1.0)
-        log_alpha[k]  = ti.get("alpha", 1.0)
+    log_tank_s[k]       = ti.get("tank_s", ctrl.tank_s0)
+    log_beta_t_prime[k] = ti.get("beta_t_prime", 1.0)
+    log_beta_n_prime[k] = ti.get("beta_n_prime", 1.0)
+    log_beta_t[k]       = ti.get("beta_t", 1.0)
+    log_beta_n[k]       = ti.get("beta_n", 1.0)
+    log_p_t[k]          = ti.get("p_t", 0.0)
+    log_p_n[k]          = ti.get("p_n", 0.0)
+    log_p_d[k]          = ti.get("p_d", 0.0)
+    log_F_des[k]        = ti.get("F_des_normal", 0.0)
+    log_motion_norm[k]  = ti.get("motion_norm", 0.0)
+    log_force_norm[k]   = ti.get("force_norm", 0.0)
+    log_vd_norm[k]      = ti.get("vd_norm", 0.0)
+    log_alpha[k]        = ti.get("alpha", 1.0)
 
     if k % 5000 == 0:
         print(f"  {k*dt:.1f}s / {SIM_T:.0f}s")
@@ -347,97 +358,82 @@ fig.savefig(f"{OUT}/fig_ds_surface_convergence_xz.pdf", bbox_inches="tight", dpi
 fig.savefig(f"{OUT}/fig_ds_surface_convergence_xz.png", bbox_inches="tight", dpi=200)
 plt.close()
 
-# ─── Figure: Energy tank (static, mirrors TankMonitor layout) ────────────────
-if ctrl.use_energy_tank:
-    import matplotlib.gridspec as gridspec
+# ─── Figure 6: Energy Tank ────────────────────────────────────────────────────
+LP10 = 10
+fn_filt = uniform_filter1d(log_fn, size=LP10)
 
-    _C_TANK  = "#2196F3"
-    _C_PD    = "#4CAF50"
-    _C_PR    = "#FF9800"
-    _C_PN    = "#E91E63"
-    _C_NET   = "#9C27B0"
-    _C_SMAX  = "#F44336"
+fig, axes = plt.subplots(4, 1, figsize=(9, 11), sharex=True)
+fig.suptitle("Energy Tank Analysis", fontsize=13, fontweight="bold")
 
-    fig = plt.figure(figsize=(13, 8))
-    fig.patch.set_facecolor("#1a1a2e")
-    gs = gridspec.GridSpec(3, 2, figure=fig,
-                           left=0.08, right=0.97, top=0.92, bottom=0.08,
-                           hspace=0.45, wspace=0.35)
-    _ax_kw = dict(facecolor="#16213e")
+# Panel A — tank energy
+ax = axes[0]
+ax.fill_between(log_t, log_tank_s, alpha=0.18, color="tab:purple")
+ax.plot(log_t, log_tank_s, lw=1.0, color="tab:purple", label="$s(t)$ — tank energy")
+ax.axhline(ctrl.tank_s_max, color="tab:red",  ls="--", lw=1.0,
+           label=f"$s_{{max}}$ = {ctrl.tank_s_max:.1f} J")
+ax.axhline(ctrl.tank_s0,    color="tab:gray", ls=":",  lw=0.8,
+           label=f"$s_0$ = {ctrl.tank_s0:.1f} J")
+if ctrl.tank_delta > 0:
+    soft = ctrl.tank_s_max - ctrl.tank_delta
+    ax.axhline(soft, color="gold", ls="-.", lw=0.9,
+               label=f"$s_{{max}} - \\delta$ = {soft:.1f} J (alpha shutoff)")
+if _d_t0 is not None:
+    ax.axvspan(_d_t0, _d_t1, color="orange", alpha=0.15, label="disturbance")
+ax.set_ylim(bottom=0)
+ax.set_ylabel("Energy [J]")
+ax.set_title("A.  Tank Energy $s(t)$")
+ax.legend(fontsize=8, ncol=2); ax.grid(True, alpha=0.3)
 
-    ax_tank = fig.add_subplot(gs[0, :], **_ax_kw)
-    ax_pwr  = fig.add_subplot(gs[1, 0], **_ax_kw)
-    ax_net  = fig.add_subplot(gs[1, 1], **_ax_kw)
-    ax_beta = fig.add_subplot(gs[2, 0], **_ax_kw)
-    ax_alph = fig.add_subplot(gs[2, 1], **_ax_kw)
+# Panel B — beta scalings
+ax = axes[1]
+ax.plot(log_t, log_beta_t_prime, lw=1.1, color="tab:blue",
+        label=r"$\beta_t'$ (motion, active gating)")
+ax.plot(log_t, log_beta_n_prime, lw=1.1, color="tab:red",
+        label=r"$\beta_n'$ (force, active gating)")
+ax.plot(log_t, log_beta_t, lw=0.6, color="tab:blue",  ls="--",
+        label=r"$\beta_t$ (tank update)")
+ax.plot(log_t, log_beta_n, lw=0.6, color="tab:red",   ls="--",
+        label=r"$\beta_n$ (tank update)")
+ax.set_ylim(-0.05, 1.15)
+ax.set_yticks([0, 0.5, 1])
+ax.set_ylabel("Scaling")
+ax.set_title(r"B.  Beta Scalings  (1 = fully active, 0 = blocked by empty tank)")
+if _d_t0 is not None:
+    ax.axvspan(_d_t0, _d_t1, color="orange", alpha=0.15)
+ax.legend(fontsize=8, ncol=2); ax.grid(True, alpha=0.3)
 
-    for ax in (ax_tank, ax_pwr, ax_net, ax_beta, ax_alph):
-        ax.tick_params(colors="white", labelsize=8)
-        for spine in ax.spines.values():
-            spine.set_edgecolor("#444")
-        ax.xaxis.label.set_color("white")
-        ax.yaxis.label.set_color("white")
-        ax.title.set_color("white")
-        ax.grid(True, color="#2a2a4a", linewidth=0.5)
+# Panel C — power terms
+ax = axes[2]
+ax.plot(log_t, log_p_t, lw=0.7, color="tab:blue",
+        label=r"$p_t = \dot{x}^T D\,f_t$  (tangential active)")
+ax.plot(log_t, log_p_n, lw=0.7, color="tab:red",
+        label=r"$p_n = \dot{x}^T D\,f_n$  (normal force)")
+ax.plot(log_t, log_p_d, lw=0.9, color="tab:green",
+        label=r"$p_d = \dot{x}^T D\,\dot{x}$  (dissipation, charges tank)")
+ax.axhline(0, color="k", lw=0.5)
+ax.set_ylabel("Power [W]")
+ax.set_title(r"C.  Power Terms  ($p_d$ charges tank; $p_t, p_n > 0$ drain it)")
+if _d_t0 is not None:
+    ax.axvspan(_d_t0, _d_t1, color="orange", alpha=0.15)
+ax.legend(fontsize=8, ncol=3); ax.grid(True, alpha=0.3)
 
-    t = log_t
-    s_max = ctrl.tank_s_max
+# Panel D — force tracking
+ax = axes[3]
+ax.plot(log_t, log_fn,      lw=0.35, alpha=0.25, color="tab:blue", label="$F_n$ raw")
+ax.plot(log_t, fn_filt,     lw=1.1,              color="tab:blue", label="$F_n$ filtered")
+ax.plot(log_t, log_F_des,   lw=1.1,              color="tab:orange",
+        label="$F_{des}$ (ramped command)")
+ax.axhline(config.FORCE_DESIRED, color="r", ls="--", lw=1.0,
+           label=f"$F_d$ = {config.FORCE_DESIRED:.0f} N")
+ax.set_ylabel("Force [N]")
+ax.set_xlabel("Time [s]")
+ax.set_title("D.  Contact Force Tracking")
+if _d_t0 is not None:
+    ax.axvspan(_d_t0, _d_t1, color="orange", alpha=0.15, label="disturbance")
+ax.legend(fontsize=8, ncol=2); ax.grid(True, alpha=0.3)
 
-    ax_tank.fill_between(t, log_tank_s, color=_C_TANK, alpha=0.35, label="tank s")
-    ax_tank.plot(t, log_tank_s, color=_C_TANK, lw=1.0)
-    ax_tank.axhline(s_max, color=_C_SMAX, ls="--", lw=1.2, label=f"s_max={s_max:.0f} J")
-    ax_tank.axhline(0, color="white", ls=":", lw=0.8)
-    low = log_tank_s < 0.1 * s_max
-    if low.any():
-        ax_tank.fill_between(t, np.where(low, log_tank_s, 0.0), color=_C_SMAX, alpha=0.25)
-    ax_tank.set_ylim(-s_max * 0.05, s_max * 1.15)
-    ax_tank.set_ylabel("Tank energy  s  [J]", fontsize=9)
-    ax_tank.set_title(
-        f"Energy Tank Level   s_final = {log_tank_s[-1]:.2f} J / {s_max:.0f} J"
-        f"  ({100*log_tank_s[-1]/s_max:.1f} %)",
-        fontsize=10, fontweight="bold", color="white")
-    ax_tank.set_xlabel("time  [s]", fontsize=9)
-    ax_tank.legend(fontsize=8, loc="upper right", facecolor="#1a1a2e", labelcolor="white")
-
-    ax_pwr.plot(t, log_pd, color=_C_PD, lw=0.8, label="p_d (dissipated → charges)")
-    ax_pwr.plot(t, log_pr, color=_C_PR, lw=0.8, label="β_r·p_r (orbit draw)")
-    ax_pwr.plot(t, log_pn, color=_C_PN, lw=0.8, label="β_n·p_n (force draw)")
-    ax_pwr.axhline(0, color="white", ls=":", lw=0.6)
-    ax_pwr.set_ylabel("Power  [W]", fontsize=9)
-    ax_pwr.set_xlabel("time  [s]", fontsize=9)
-    ax_pwr.set_title("Power Flows", fontsize=10, fontweight="bold")
-    ax_pwr.legend(fontsize=7, loc="upper right", facecolor="#1a1a2e", labelcolor="white")
-
-    ax_net.fill_between(t, np.maximum(log_net, 0), color=_C_PD, alpha=0.20)
-    ax_net.fill_between(t, np.minimum(log_net, 0), color=_C_PR, alpha=0.20)
-    ax_net.plot(t, log_net, color=_C_NET, lw=0.8, label="ṡ = α·p_d − β_r·p_r − β_n·p_n")
-    ax_net.axhline(0, color="white", ls=":", lw=0.6)
-    ax_net.set_ylabel("ṡ  [J/s]", fontsize=9)
-    ax_net.set_xlabel("time  [s]", fontsize=9)
-    ax_net.set_title("Net Tank Rate  ṡ", fontsize=10, fontweight="bold")
-    ax_net.legend(fontsize=7, loc="upper right", facecolor="#1a1a2e", labelcolor="white")
-
-    ax_beta.plot(t, log_beta_r, color=_C_PR, lw=1.2, drawstyle="steps-post", label="β_r' (orbit gate)")
-    ax_beta.plot(t, log_beta_n, color=_C_PN, lw=1.2, drawstyle="steps-post", ls="--", label="β_n' (force gate)")
-    ax_beta.set_ylim(-0.08, 1.18)
-    ax_beta.set_yticks([0, 1])
-    ax_beta.set_ylabel("β  [0/1]", fontsize=9)
-    ax_beta.set_xlabel("time  [s]", fontsize=9)
-    ax_beta.set_title("Beta Gates", fontsize=10, fontweight="bold")
-    ax_beta.legend(fontsize=7, loc="upper right", facecolor="#1a1a2e", labelcolor="white")
-
-    ax_alph.plot(t, log_alpha, color="white", lw=0.8, label="α (charging coeff)")
-    ax_alph.set_ylim(-0.08, 1.18)
-    ax_alph.set_yticks([0.0, 0.5, 1.0])
-    ax_alph.set_ylabel("α  [0–1]", fontsize=9)
-    ax_alph.set_xlabel("time  [s]", fontsize=9)
-    ax_alph.set_title("Charging Coefficient α", fontsize=10, fontweight="bold")
-    ax_alph.legend(fontsize=7, loc="upper right", facecolor="#1a1a2e", labelcolor="white")
-
-    fig.suptitle("Energy Tank Monitor  —  full run", fontsize=12, fontweight="bold", color="white")
-    fig.savefig(f"{OUT}/fig_tank_monitor.pdf", bbox_inches="tight", dpi=200,
-                facecolor=fig.get_facecolor())
-    fig.savefig(f"{OUT}/fig_tank_monitor.png", bbox_inches="tight", dpi=200,
-                facecolor=fig.get_facecolor())
-    plt.close()
-    print(f"Tank monitor figure saved to: {OUT}/fig_tank_monitor.{{pdf,png}}")
+fig.tight_layout()
+fig.savefig(f"{OUT}/fig_energy_tank.pdf", bbox_inches="tight", dpi=200)
+fig.savefig(f"{OUT}/fig_energy_tank.png", bbox_inches="tight", dpi=200)
+plt.close()
+print("Energy tank figure saved.")
